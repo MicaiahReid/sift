@@ -11,13 +11,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Map, Value, json};
+use sift_core::Registry;
+use sift_types::IdlSource;
 use std::{
     collections::BTreeMap,
     io::IsTerminal,
     time::{Duration, Instant},
 };
-use wip_core::Registry;
-use wip_types::IdlSource;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DecodedAccount {

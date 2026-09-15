@@ -1,7 +1,7 @@
 //! Cross-crate account layout regression coverage.
 
 use serde_json::json;
-use wip_core::{
+use sift_core::{
     BuildOptions, TransactionVersion, build_transaction, decode_account, encode_account, parse_idl,
 };
 

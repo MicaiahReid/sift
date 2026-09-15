@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use sift_types::{InstructionSchema, ProgramSchema};
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
@@ -12,7 +13,6 @@ use solana_message::{Message, VersionedMessage, v0, v1};
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
 use tracing::debug;
-use wip_types::{InstructionSchema, ProgramSchema};
 
 use crate::codec::encode_type;
 use crate::idl::find_instruction;

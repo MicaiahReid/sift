@@ -1,11 +1,11 @@
 [package]
-name = "wip"
+name = "sift"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "wip"
+name = "sift"
 path = "src/main.rs"
 
 [dependencies]
@@ -23,8 +23,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-wip-core = { path = "../core" }
-wip-types = { path = "../types" }
+sift-core = { path = "../core" }
+sift-types = { path = "../types" }
 
 [lints]
 workspace = true

@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
+use sift_core::Registry;
+use sift_types::IdlSource;
 use tracing::debug;
-use wip_core::Registry;
-use wip_types::IdlSource;
 
 use crate::{
     ContextOptions,

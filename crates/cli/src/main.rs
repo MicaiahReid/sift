@@ -1,13 +1,13 @@
-//! Command-line frontend for the `wip` IDL-aware Solana tooling.
+//! Command-line frontend for the `sift` IDL-aware Solana tooling.
 
 use std::{io::IsTerminal, path::PathBuf};
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use dialoguer::console::style;
+use sift_core::Registry;
 use tracing::{debug, error};
 use tracing_subscriber::{EnvFilter, fmt};
-use wip_core::Registry;
 
 mod commands;
 mod tui;
@@ -15,7 +15,7 @@ mod utils;
 
 /// Solana account introspection and unsigned transaction construction.
 #[derive(Parser, Debug)]
-#[command(name = "wip", version, about)]
+#[command(name = "sift", version, about)]
 struct Cli {
     /// Explicit registry TOML path.
     #[arg(long, global = true)]
@@ -77,8 +77,8 @@ async fn main() {
 fn init_logging(verbose: u8) {
     let fallback = match verbose {
         0 => "warn",
-        1 => "wip=debug,wip_core=debug,warn",
-        _ => "wip=trace,wip_core=trace,warn",
+        1 => "sift=debug,sift_core=debug,warn",
+        _ => "sift=trace,sift_core=trace,warn",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
     fmt()

@@ -3,10 +3,10 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use tracing::debug;
-use wip_core::{
+use sift_core::{
     Registry, RpcClient, decode_account_with_info, encode_account, find_account, patch_value,
 };
+use tracing::debug;
 
 use crate::{
     ContextOptions,

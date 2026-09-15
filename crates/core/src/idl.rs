@@ -3,10 +3,10 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracing::{debug, trace};
-use wip_types::{
+use sift_types::{
     AccountSchema, FieldSchema, InstructionAccountSchema, InstructionSchema, ProgramSchema,
 };
+use tracing::{debug, trace};
 
 /// Parses an Anchor (legacy or current) IDL, or a compatible common Codama shape.
 pub fn parse_idl(input: &str, program_address: &str) -> Result<ProgramSchema> {

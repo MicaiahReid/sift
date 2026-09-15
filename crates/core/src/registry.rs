@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde_json::Value;
+use sift_types::{IdlSource, RegistryConfig};
 use tracing::{debug, warn};
-use wip_types::{IdlSource, RegistryConfig};
 
 use crate::idl::parse_idl;
 
@@ -23,14 +23,14 @@ pub struct Registry {
 #[derive(Clone, Debug)]
 pub struct LoadedSchema {
     /// Parsed program schema.
-    pub schema: wip_types::ProgramSchema,
+    pub schema: sift_types::ProgramSchema,
     /// Source selected after explicit-source or registry fallback resolution.
     pub source: IdlSource,
 }
 
 /// Returns the platform-appropriate persistent registry location.
 pub fn default_registry_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("org", "solana", "wip")
+    let dirs = ProjectDirs::from("org", "solana", "sift")
         .ok_or_else(|| anyhow::anyhow!("cannot determine a platform config directory"))?;
     Ok(dirs.config_dir().join("registry.toml"))
 }
@@ -121,7 +121,7 @@ impl Registry {
         &self,
         program: &str,
         explicit_idl: Option<&Path>,
-    ) -> Result<wip_types::ProgramSchema> {
+    ) -> Result<sift_types::ProgramSchema> {
         Ok(self
             .load_schema_with_source(program, explicit_idl)
             .await?
@@ -155,7 +155,7 @@ impl Registry {
         }
         let entry = self.config.programs.get(&address).ok_or_else(|| {
             anyhow::anyhow!(
-                "no IDL registered for {address}; run `wip idl add {address} --file FILE`"
+                "no IDL registered for {address}; run `sift idl add {address} --file FILE`"
             )
         })?;
         let client = reqwest::Client::builder()

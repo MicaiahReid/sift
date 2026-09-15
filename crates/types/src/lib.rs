@@ -80,7 +80,7 @@ pub struct ProgramSchema {
 /// One account's discriminator and Borsh-compatible layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountSchema {
-    /// Name used by `wip account list TYPE` and `--type TYPE`.
+    /// Name used by `sift account list TYPE` and `--type TYPE`.
     pub name: String,
     /// Prefix that uniquely identifies this account type, usually eight bytes.
     pub discriminator: Vec<u8>,
@@ -91,7 +91,7 @@ pub struct AccountSchema {
 /// One instruction's data and account metadata contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstructionSchema {
-    /// Name used by `wip transaction build INSTRUCTION`.
+    /// Name used by `sift transaction build INSTRUCTION`.
     pub name: String,
     /// Prefix written before encoded argument values.
     pub discriminator: Vec<u8>,

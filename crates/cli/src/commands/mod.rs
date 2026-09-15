@@ -1,4 +1,4 @@
-//! Thin clap command modules that delegate work to `wip-core`.
+//! Thin clap command modules that delegate work to `sift-core`.
 
 pub mod account;
 pub mod idl;

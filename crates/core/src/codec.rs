@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Number, Value};
+use sift_types::AccountSchema;
 use tracing::{debug, trace};
-use wip_types::AccountSchema;
 
 /// Details about bytes present after an IDL account layout has been decoded.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

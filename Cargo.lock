@@ -2001,6 +2001,77 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "sift"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64 0.23.1",
+ "bs58",
+ "clap",
+ "dialoguer",
+ "directories",
+ "hex",
+ "ratatui",
+ "serde_json",
+ "sift-core",
+ "sift-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "sift-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "bs58",
+ "directories",
+ "glob",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sift-types",
+ "solana-address",
+ "solana-hash",
+ "solana-instruction 3.5.1",
+ "solana-message",
+ "solana-signature",
+ "solana-transaction",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml_edit",
+ "tracing",
+ "url",
+ "walkdir",
+ "wincode",
+]
+
+[[package]]
+name = "sift-integration"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sift-core",
+ "tempfile",
+]
+
+[[package]]
+name = "sift-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2938,77 +3009,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "wip"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "base64 0.23.1",
- "bs58",
- "clap",
- "dialoguer",
- "directories",
- "hex",
- "ratatui",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "wip-core",
- "wip-types",
-]
-
-[[package]]
-name = "wip-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "bs58",
- "directories",
- "glob",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "solana-address",
- "solana-hash",
- "solana-instruction 3.5.1",
- "solana-message",
- "solana-signature",
- "solana-transaction",
- "tempfile",
- "thiserror",
- "tokio",
- "toml_edit",
- "tracing",
- "url",
- "walkdir",
- "wincode",
- "wip-types",
-]
-
-[[package]]
-name = "wip-integration"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "wip-core",
-]
-
-[[package]]
-name = "wip-types"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "url",
 ]
 
 [[package]]

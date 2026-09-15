@@ -4,8 +4,8 @@ use anyhow::Result;
 use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
+use sift_core::{BuildOptions, Registry, RpcClient, TransactionVersion, build_transaction};
 use tracing::debug;
-use wip_core::{BuildOptions, Registry, RpcClient, TransactionVersion, build_transaction};
 
 use crate::{
     ContextOptions,

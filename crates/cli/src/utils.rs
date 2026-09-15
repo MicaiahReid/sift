@@ -10,9 +10,9 @@ use clap::ValueEnum;
 use dialoguer::{Confirm, Select, console::style, theme::ColorfulTheme};
 use directories::BaseDirs;
 use serde_json::{Value, json};
+use sift_core::{LocalIdlCandidate, Registry, discover_local_idls, parse_cli_value};
+use sift_types::{IdlSource, ProgramSchema};
 use tracing::{debug, warn};
-use wip_core::{LocalIdlCandidate, Registry, discover_local_idls, parse_cli_value};
-use wip_types::{IdlSource, ProgramSchema};
 
 use crate::ContextOptions;
 
