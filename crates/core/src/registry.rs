@@ -19,6 +19,15 @@ pub struct Registry {
     pub config: RegistryConfig,
 }
 
+/// A schema together with the IDL source that successfully produced it.
+#[derive(Clone, Debug)]
+pub struct LoadedSchema {
+    /// Parsed program schema.
+    pub schema: wip_types::ProgramSchema,
+    /// Source selected after explicit-source or registry fallback resolution.
+    pub source: IdlSource,
+}
+
 /// Returns the platform-appropriate persistent registry location.
 pub fn default_registry_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("org", "solana", "wip")
@@ -113,6 +122,18 @@ impl Registry {
         program: &str,
         explicit_idl: Option<&Path>,
     ) -> Result<wip_types::ProgramSchema> {
+        Ok(self
+            .load_schema_with_source(program, explicit_idl)
+            .await?
+            .schema)
+    }
+
+    /// Reads a schema and returns the source that successfully produced it.
+    pub async fn load_schema_with_source(
+        &self,
+        program: &str,
+        explicit_idl: Option<&Path>,
+    ) -> Result<LoadedSchema> {
         let address = self.program_address(program)?;
         debug!(program, address, explicit_idl = ?explicit_idl, "resolving program schema");
         if let Some(path) = explicit_idl {
@@ -121,7 +142,13 @@ impl Registry {
                 .with_context(|| format!("cannot read IDL {}", path.display()))?;
             let schema = parse_idl(&text, &address)?;
             debug!(path = %path.display(), schema = %schema.name, "loaded explicit IDL");
-            return Ok(schema);
+            return Ok(LoadedSchema {
+                schema,
+                source: IdlSource::File {
+                    name: path.display().to_string(),
+                    path: path.to_path_buf(),
+                },
+            });
         }
         let entry = self.config.programs.get(&address).ok_or_else(|| {
             anyhow::anyhow!(
@@ -158,7 +185,10 @@ impl Registry {
             match text.and_then(|text| parse_idl(&text, &address)) {
                 Ok(schema) => {
                     debug!(address, schema = %schema.name, "loaded registered IDL source");
-                    return Ok(schema);
+                    return Ok(LoadedSchema {
+                        schema,
+                        source: source.clone(),
+                    });
                 }
                 Err(error) => {
                     warn!(address, source = ?source, error = %error, "registered IDL source failed");
@@ -210,5 +240,29 @@ mod tests {
             .unwrap();
         assert_eq!(registry.program_address("ncn_snapshot").unwrap(), ADDRESS);
         assert_eq!(registry.program_address("ncn-snapshot").unwrap(), ADDRESS);
+    }
+
+    #[tokio::test]
+    async fn reports_the_explicit_idl_source_that_loaded_the_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("example.json");
+        tokio::fs::write(
+            &path,
+            r#"{"name":"example","accounts":[],"instructions":[{"name":"ping","discriminator":[1,2,3,4,5,6,7,8],"accounts":[],"args":[]}]}"#,
+        )
+        .await
+        .unwrap();
+        let registry = Registry {
+            path: directory.path().join("registry.toml"),
+            config: RegistryConfig::default(),
+        };
+
+        let loaded = registry
+            .load_schema_with_source(ADDRESS, Some(&path))
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.schema.name, "example");
+        assert!(matches!(loaded.source, IdlSource::File { path: source, .. } if source == path));
     }
 }

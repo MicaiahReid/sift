@@ -8,7 +8,11 @@ use wip_core::{Registry, RpcClient, decode_account, encode_account, find_account
 
 use crate::{
     ContextOptions,
-    utils::{BytesFormat, parse_assignment, print_bytes, read_value_json, resolve_schema},
+    tui::{DecodedAccount, RequestMetadata, account_list_json, run, should_run},
+    utils::{
+        BytesFormat, parse_assignment, print_bytes, read_value_json, resolve_schema,
+        resolve_schema_with_source,
+    },
 };
 
 /// Account command group.
@@ -26,6 +30,9 @@ enum AccountSubcommand {
         account_type: String,
         #[arg(long)]
         program: String,
+        /// Print the decoded JSON instead of opening the interactive account browser.
+        #[arg(long)]
+        no_tui: bool,
     },
     /// Fetch, decode, and patch account bytes locally; this never writes on-chain.
     Patch {
@@ -60,18 +67,32 @@ impl AccountCommand {
             AccountSubcommand::List {
                 account_type,
                 program,
+                no_tui,
             } => {
                 debug!(program, account_type, "listing program accounts");
-                let schema = resolve_schema(registry, &program, context).await?;
+                let resolved = resolve_schema_with_source(registry, &program, context).await?;
+                let schema = resolved.schema;
                 let layout = find_account(&schema, &account_type)?;
                 let rpc = RpcClient::new(context.url.clone(), context.commitment.clone())?;
+                let metadata = RequestMetadata {
+                    account_type: layout.name.clone(),
+                    program: schema.address.clone(),
+                    idl_location: resolved.idl_location,
+                    rpc_url: rpc.url.clone(),
+                    commitment: rpc.commitment.clone(),
+                };
                 let filters = json!([{ "memcmp": { "offset": 0, "bytes": bs58::encode(&layout.discriminator).into_string() }}]);
                 let accounts = rpc.program_accounts(&schema.address, filters).await?;
                 let mut result = Vec::new();
                 for (address, bytes) in accounts {
                     match decode_account(layout, &schema.types, &bytes) {
                         Ok(data) => {
-                            result.push(json!({"address":address,"type":layout.name,"data":data,"seeds":"unresolved: IDLs do not include Anchor source seed recipes"}));
+                            result.push(DecodedAccount {
+                                address,
+                                account_type: layout.name.clone(),
+                                data,
+                                seeds: None,
+                            });
                         }
                         Err(e) => {
                             debug!(account = %layout.name, byte_length = bytes.len(), error = %e, "failed to decode account data");
@@ -79,7 +100,21 @@ impl AccountCommand {
                     }
                 }
                 debug!(account_type = %layout.name, matched_count = result.len(), "decoded matching program accounts");
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                let use_tui = should_run(no_tui, !result.is_empty());
+                debug!(
+                    no_tui,
+                    has_accounts = !result.is_empty(),
+                    use_tui,
+                    "selected account-list presentation"
+                );
+                if use_tui {
+                    run(&result, &layout.ty, &schema.types, metadata)?;
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&account_list_json(&result))?
+                    );
+                }
             }
             AccountSubcommand::Patch {
                 address,

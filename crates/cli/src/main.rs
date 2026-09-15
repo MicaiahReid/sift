@@ -10,6 +10,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use wip_core::Registry;
 
 mod commands;
+mod tui;
 mod utils;
 
 /// Solana account introspection and unsigned transaction construction.

@@ -104,11 +104,35 @@ pub(crate) async fn resolve_schema(
     program: &str,
     context: &ContextOptions,
 ) -> Result<ProgramSchema> {
+    Ok(resolve_schema_with_source(registry, program, context)
+        .await?
+        .schema)
+}
+
+/// A resolved schema and the actual IDL location used to produce it.
+pub(crate) struct ResolvedSchema {
+    pub(crate) schema: ProgramSchema,
+    pub(crate) idl_location: String,
+}
+
+/// Loads a program schema and retains the source location for interactive presentation.
+pub(crate) async fn resolve_schema_with_source(
+    registry: &mut Registry,
+    program: &str,
+    context: &ContextOptions,
+) -> Result<ResolvedSchema> {
     debug!(program, explicit_idl = ?context.idl, "attempting schema resolution");
-    match registry.load_schema(program, context.idl.as_deref()).await {
-        Ok(schema) => {
-            debug!(program, schema = %schema.name, "resolved schema from configured source");
-            Ok(schema)
+    match registry
+        .load_schema_with_source(program, context.idl.as_deref())
+        .await
+    {
+        Ok(loaded) => {
+            debug!(program, schema = %loaded.schema.name, source = ?loaded.source, "resolved schema from configured source");
+            let idl_location = idl_source_location(&loaded.source);
+            Ok(ResolvedSchema {
+                schema: loaded.schema,
+                idl_location,
+            })
         }
         Err(error) if context.idl.is_some() => Err(error),
         Err(error) => {
@@ -137,9 +161,14 @@ pub(crate) async fn resolve_schema(
                         "Using discovered IDL temporarily: {}",
                         display_path(&selected.idl_path)
                     ));
-                    registry
-                        .load_schema(program, Some(&selected.idl_path))
-                        .await
+                    let loaded = registry
+                        .load_schema_with_source(program, Some(&selected.idl_path))
+                        .await?;
+                    let idl_location = idl_source_location(&loaded.source);
+                    Ok(ResolvedSchema {
+                        schema: loaded.schema,
+                        idl_location,
+                    })
                 } else if !confirm_registration(&selected)? {
                     debug!(path = %selected.idl_path.display(), "user declined discovered IDL registration");
                     Err(initial_error.context(format!(
@@ -161,10 +190,27 @@ pub(crate) async fn resolve_schema(
                         "Registered discovered IDL: {}",
                         display_path(&selected.idl_path)
                     ));
-                    registry.load_schema(program, None).await
+                    let loaded = registry.load_schema_with_source(program, None).await?;
+                    let idl_location = idl_source_location(&loaded.source);
+                    Ok(ResolvedSchema {
+                        schema: loaded.schema,
+                        idl_location,
+                    })
                 }
             }
         }
+    }
+}
+
+/// Formats the actual selected IDL source for compact terminal presentation.
+fn idl_source_location(source: &IdlSource) -> String {
+    match source {
+        IdlSource::File { path, .. } => display_path(path),
+        IdlSource::Url { url, .. } => url.to_string(),
+        IdlSource::OnChain { address, .. } => address.as_deref().map_or_else(
+            || "on-chain IDL".to_owned(),
+            |address| format!("on-chain IDL ({address})"),
+        ),
     }
 }
 
