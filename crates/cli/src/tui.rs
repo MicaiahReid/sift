@@ -25,6 +25,8 @@ pub(crate) struct DecodedAccount {
     pub(crate) account_type: String,
     pub(crate) data: Value,
     pub(crate) seeds: Option<String>,
+    /// A non-fatal limitation encountered while decoding this account.
+    pub(crate) note: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RequestMetadata {
@@ -65,6 +67,7 @@ struct Node {
     children: Vec<Node>,
     bytes: Option<Vec<u8>>,
     openable: bool,
+    warning: bool,
 }
 
 pub(crate) fn should_run(no_tui: bool, has_items: bool) -> bool {
@@ -81,6 +84,9 @@ impl DecodedAccount {
         result.insert("data".into(), self.data.clone());
         if let Some(seeds) = &self.seeds {
             result.insert("seeds".into(), Value::String(seeds.clone()));
+        }
+        if let Some(note) = &self.note {
+            result.insert("note".into(), Value::String(note.clone()));
         }
         Value::Object(result)
     }
@@ -113,14 +119,21 @@ pub(crate) fn account_document(
         },
         nodes: accounts
             .iter()
-            .map(|account| Node {
-                label: account.address.clone(),
-                ty: account.account_type.clone(),
-                preview: account.seeds.clone().unwrap_or_default(),
-                raw: account.data.clone(),
-                children: account_children(&account.data, ty, definitions),
-                bytes: None,
-                openable: true,
+            .map(|account| {
+                let mut children = account_children(&account.data, ty, definitions);
+                if let Some(note) = &account.note {
+                    children.insert(0, warning_node("Note", note));
+                }
+                Node {
+                    label: account.address.clone(),
+                    ty: account.account_type.clone(),
+                    preview: account.seeds.clone().unwrap_or_default(),
+                    raw: account.data.clone(),
+                    children,
+                    bytes: None,
+                    openable: true,
+                    warning: false,
+                }
             })
             .collect(),
     }
@@ -167,6 +180,7 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
                         children: aliases.iter().map(|alias| alias_node(alias)).collect(),
                         bytes: None,
                         openable: true,
+                        warning: false,
                     },
                     Node {
                         label: "Sources".into(),
@@ -176,10 +190,12 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
                         children: sources,
                         bytes: None,
                         openable: true,
+                        warning: false,
                     },
                 ],
                 bytes: None,
                 openable: true,
+                warning: false,
             }
         })
         .collect();
@@ -225,6 +241,7 @@ fn alias_node(alias: &str) -> Node {
         children: vec![],
         bytes: None,
         openable: true,
+        warning: false,
     }
 }
 
@@ -237,6 +254,7 @@ fn source_field(label: &str, raw: Value, preview: String) -> Node {
         children: vec![],
         bytes: None,
         openable: true,
+        warning: false,
     }
 }
 fn source_node(index: usize, source: &IdlSource) -> Node {
@@ -257,6 +275,7 @@ fn source_node(index: usize, source: &IdlSource) -> Node {
         children: source_children(source),
         bytes: None,
         openable: true,
+        warning: false,
     }
 }
 
@@ -573,7 +592,14 @@ impl App {
                     Span::raw("  "),
                     Span::styled(truncate(&node.ty, 16), Style::default().fg(Color::Yellow)),
                     Span::raw("  "),
-                    Span::raw(truncate(&node.preview, width)),
+                    Span::styled(
+                        truncate(&node.preview, width),
+                        if node.warning {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        },
+                    ),
                 ]))
             })
             .collect();
@@ -643,6 +669,7 @@ fn account_node(label: &str, value: &Value, ty: &Value, defs: &BTreeMap<String, 
         children,
         bytes,
         openable: true,
+        warning: false,
     }
 }
 fn generic_children(value: &Value) -> Vec<Node> {
@@ -676,6 +703,19 @@ fn generic_node(label: &str, value: &Value) -> Node {
         children: generic_children(value),
         bytes: None,
         openable: true,
+        warning: false,
+    }
+}
+fn warning_node(label: &str, note: &str) -> Node {
+    Node {
+        label: label.into(),
+        ty: "note".into(),
+        preview: note.into(),
+        raw: Value::String(note.into()),
+        children: vec![],
+        bytes: None,
+        openable: true,
+        warning: true,
     }
 }
 fn resolve_type<'a>(mut ty: &'a Value, defs: &'a BTreeMap<String, Value>) -> &'a Value {
@@ -812,6 +852,7 @@ mod tests {
             account_type: "State".into(),
             data: json!({"bytes":[65,66,0],"count":"7"}),
             seeds: None,
+            note: None,
         }
     }
 
@@ -835,6 +876,19 @@ mod tests {
             account_document(&[account()], &account_type(), &BTreeMap::new(), metadata());
         assert!(document.raw.to_string().contains("Example"));
         assert_eq!(document.nodes[0].children[0].bytes, Some(vec![65, 66, 0]));
+    }
+
+    #[test]
+    fn account_adapter_surfaces_non_fatal_decode_notes() {
+        let mut decoded = account();
+        decoded.note = Some("Parsed with 32 unmodelled trailing byte(s).".into());
+
+        let document = account_document(&[decoded], &account_type(), &BTreeMap::new(), metadata());
+
+        assert!(document.raw.to_string().contains("unmodelled trailing"));
+        assert!(!document.nodes[0].warning);
+        assert_eq!(document.nodes[0].children[0].label, "Note");
+        assert!(document.nodes[0].children[0].warning);
     }
 
     #[test]

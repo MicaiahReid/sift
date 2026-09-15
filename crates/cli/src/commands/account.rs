@@ -1,10 +1,12 @@
 //! Account inspection and offline byte-patching commands.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tracing::debug;
-use wip_core::{Registry, RpcClient, decode_account, encode_account, find_account, patch_value};
+use wip_core::{
+    Registry, RpcClient, decode_account_with_info, encode_account, find_account, patch_value,
+};
 
 use crate::{
     ContextOptions,
@@ -85,13 +87,21 @@ impl AccountCommand {
                 let accounts = rpc.program_accounts(&schema.address, filters).await?;
                 let mut result = Vec::new();
                 for (address, bytes) in accounts {
-                    match decode_account(layout, &schema.types, &bytes) {
-                        Ok(data) => {
+                    match decode_account_with_info(layout, &schema.types, &bytes) {
+                        Ok((data, decode_info)) => {
+                            let note = decode_info.has_unmodelled_data().then(|| {
+                                format!(
+                                    "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
+                                    decode_info.trailing_byte_count,
+                                    decode_info.non_zero_trailing_byte_count,
+                                )
+                            });
                             result.push(DecodedAccount {
                                 address,
                                 account_type: layout.name.clone(),
                                 data,
                                 seeds: None,
+                                note,
                             });
                         }
                         Err(e) => {
@@ -149,7 +159,16 @@ impl AccountCommand {
                             )
                         })?
                 };
-                let mut value = decode_account(layout, &schema.types, &bytes)?;
+                let (mut value, decode_info) =
+                    decode_account_with_info(layout, &schema.types, &bytes)?;
+                if decode_info.has_unmodelled_data() {
+                    bail!(
+                        "cannot patch {}: the IDL does not describe {} trailing byte(s), {} of which are non-zero; patching would discard them",
+                        layout.name,
+                        decode_info.trailing_byte_count,
+                        decode_info.non_zero_trailing_byte_count,
+                    );
+                }
                 patches.extend(read_value_json(set_json, "--set-json").await?);
                 for (path, replacement) in patches {
                     patch_value(&mut value, &path, replacement)?;

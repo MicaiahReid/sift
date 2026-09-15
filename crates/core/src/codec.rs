@@ -5,12 +5,43 @@ use serde_json::{Map, Number, Value};
 use tracing::{debug, trace};
 use wip_types::AccountSchema;
 
-/// Decodes one account, requiring its discriminator and accepting zero-filled allocation padding.
+/// Details about bytes present after an IDL account layout has been decoded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccountDecodeInfo {
+    /// Total bytes not described by the IDL layout.
+    pub trailing_byte_count: usize,
+    /// Number of non-zero bytes among the trailing bytes.
+    pub non_zero_trailing_byte_count: usize,
+}
+
+impl AccountDecodeInfo {
+    /// Whether trailing bytes contain non-zero data beyond expected allocation padding.
+    pub fn has_unmodelled_data(self) -> bool {
+        self.non_zero_trailing_byte_count > 0
+    }
+}
+
+/// Decodes one account, requiring its discriminator and accepting trailing allocation data.
 pub fn decode_account(
     account: &AccountSchema,
     definitions: &std::collections::BTreeMap<String, Value>,
     bytes: &[u8],
 ) -> Result<Value> {
+    Ok(decode_account_with_info(account, definitions, bytes)?.0)
+}
+
+/// Decodes an account and reports bytes the IDL does not describe.
+///
+/// Anchor accounts may reserve more space than their Borsh fields occupy or
+/// intentionally store program-specific data after their serialized layout.
+/// A successful layout decode remains useful in either case. Callers that
+/// rewrite the account data should reject [`AccountDecodeInfo::has_unmodelled_data`]
+/// to avoid dropping that data.
+pub fn decode_account_with_info(
+    account: &AccountSchema,
+    definitions: &std::collections::BTreeMap<String, Value>,
+    bytes: &[u8],
+) -> Result<(Value, AccountDecodeInfo)> {
     if !bytes.starts_with(&account.discriminator) {
         bail!("account data does not match {} discriminator", account.name)
     }
@@ -29,20 +60,25 @@ pub fn decode_account(
     };
     debug!(account = %account.name, decoded_length = decoder.offset, decoder_bytes_length = decoder.bytes.len(), "decoded account data");
     let trailing = &decoder.bytes[decoder.offset..];
-    if trailing.iter().any(|byte| *byte != 0) {
-        bail!(
-            "account data has {} non-zero trailing undecoded byte(s)",
-            trailing.len()
-        )
-    }
-    if !trailing.is_empty() {
+    let info = AccountDecodeInfo {
+        trailing_byte_count: trailing.len(),
+        non_zero_trailing_byte_count: trailing.iter().filter(|byte| **byte != 0).count(),
+    };
+    if info.has_unmodelled_data() {
+        debug!(
+            account = %account.name,
+            trailing_byte_count = info.trailing_byte_count,
+            non_zero_trailing_byte_count = info.non_zero_trailing_byte_count,
+            "accepted unmodelled trailing account data"
+        );
+    } else if !trailing.is_empty() {
         debug!(
             account = %account.name,
             padding_length = trailing.len(),
             "accepted zero-filled account allocation padding"
         );
     }
-    Ok(value)
+    Ok((value, info))
 }
 
 /// Encodes an account value with the schema's discriminator.
@@ -591,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_zero_trailing_account_data() {
+    fn reports_non_zero_trailing_account_data() {
         let account = AccountSchema {
             name: "State".into(),
             discriminator: vec![1; 8],
@@ -599,7 +635,11 @@ mod tests {
         };
         let raw = [vec![1; 8], 7u64.to_le_bytes().to_vec(), vec![0, 1, 0]].concat();
 
-        let error = decode_account(&account, &BTreeMap::new(), &raw).unwrap_err();
-        assert!(error.to_string().contains("non-zero trailing"));
+        let (value, info) = decode_account_with_info(&account, &BTreeMap::new(), &raw).unwrap();
+
+        assert_eq!(value, json!({"count": "7"}));
+        assert_eq!(info.trailing_byte_count, 3);
+        assert_eq!(info.non_zero_trailing_byte_count, 1);
+        assert!(info.has_unmodelled_data());
     }
 }
