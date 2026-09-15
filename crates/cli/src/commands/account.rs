@@ -1,0 +1,124 @@
+//! Account inspection and offline byte-patching commands.
+
+use anyhow::Result;
+use clap::{Args, Subcommand};
+use serde_json::{Value, json};
+use tracing::debug;
+use wip_core::{Registry, RpcClient, decode_account, encode_account, find_account, patch_value};
+
+use crate::{
+    ContextOptions,
+    utils::{BytesFormat, parse_assignment, print_bytes, read_value_json, resolve_schema},
+};
+
+/// Account command group.
+#[derive(Args, Debug)]
+pub(crate) struct AccountCommand {
+    #[command(subcommand)]
+    command: AccountSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountSubcommand {
+    /// List program-owned accounts that decode as TYPE.
+    List {
+        #[arg(value_name = "TYPE")]
+        account_type: String,
+        #[arg(long)]
+        program: String,
+    },
+    /// Fetch, decode, and patch account bytes locally; this never writes on-chain.
+    Patch {
+        /// Address of the account to fetch.
+        address: String,
+        /// Program alias or base58 address that owns the IDL.
+        #[arg(long)]
+        program: String,
+        /// Override discriminator-based account type selection.
+        #[arg(long = "type")]
+        account_type: Option<String>,
+        /// Dynamic field replacement in `path=value` format.
+        #[arg(long = "set", value_parser = parse_assignment)]
+        patches: Vec<(String, Value)>,
+        /// JSON object (literal, @file, or - for stdin) mapping paths to replacements.
+        #[arg(long)]
+        set_json: Option<String>,
+        /// Encoding used for the patched bytes.
+        #[arg(long, value_enum, default_value_t = BytesFormat::Base64)]
+        output: BytesFormat,
+    },
+}
+
+impl AccountCommand {
+    /// Executes the selected account command.
+    pub(crate) async fn execute(
+        self,
+        registry: &mut Registry,
+        context: &ContextOptions,
+    ) -> Result<()> {
+        match self.command {
+            AccountSubcommand::List {
+                account_type,
+                program,
+            } => {
+                debug!(program, account_type, "listing program accounts");
+                let schema = resolve_schema(registry, &program, context).await?;
+                let layout = find_account(&schema, &account_type)?;
+                let rpc = RpcClient::new(context.url.clone(), context.commitment.clone())?;
+                let filters = json!([{ "memcmp": { "offset": 0, "bytes": bs58::encode(&layout.discriminator).into_string() }}]);
+                let accounts = rpc.program_accounts(&schema.address, filters).await?;
+                let mut result = Vec::new();
+                for (address, bytes) in accounts {
+                    match decode_account(layout, &schema.types, &bytes) {
+                        Ok(data) => {
+                            result.push(json!({"address":address,"type":layout.name,"data":data,"seeds":"unresolved: IDLs do not include Anchor source seed recipes"}));
+                        }
+                        Err(e) => {
+                            debug!(account = %layout.name, byte_length = bytes.len(), error = %e, "failed to decode account data");
+                        }
+                    }
+                }
+                debug!(account_type = %layout.name, matched_count = result.len(), "decoded matching program accounts");
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            AccountSubcommand::Patch {
+                address,
+                program,
+                account_type,
+                mut patches,
+                set_json,
+                output,
+            } => {
+                debug!(program, address, requested_type = ?account_type, patch_count = patches.len(), "patching account bytes locally");
+                let schema = resolve_schema(registry, &program, context).await?;
+                let rpc = RpcClient::new(context.url.clone(), context.commitment.clone())?;
+                let bytes = rpc
+                    .account_data(&address)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("account {address} does not exist"))?;
+                let layout = if let Some(account_type) = account_type {
+                    find_account(&schema, &account_type)?
+                } else {
+                    schema
+                        .accounts
+                        .iter()
+                        .find(|layout| bytes.starts_with(&layout.discriminator))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no registered account discriminator matches; use --type"
+                            )
+                        })?
+                };
+                let mut value = decode_account(layout, &schema.types, &bytes)?;
+                patches.extend(read_value_json(set_json, "--set-json").await?);
+                for (path, replacement) in patches {
+                    patch_value(&mut value, &path, replacement)?;
+                }
+                let encoded = encode_account(layout, &schema.types, &value)?;
+                debug!(account_type = %layout.name, encoded_length = encoded.len(), "encoded patched account bytes");
+                print_bytes(&encoded, output, &value)?;
+            }
+        }
+        Ok(())
+    }
+}

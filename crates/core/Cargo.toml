@@ -1,0 +1,37 @@
+[package]
+name = "wip-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bs58.workspace = true
+directories.workspace = true
+hex.workspace = true
+glob.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+url.workspace = true
+walkdir.workspace = true
+wincode.workspace = true
+solana-address.workspace = true
+solana-hash.workspace = true
+solana-instruction.workspace = true
+solana-message.workspace = true
+solana-signature.workspace = true
+solana-transaction.workspace = true
+wip-types = { path = "../types" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

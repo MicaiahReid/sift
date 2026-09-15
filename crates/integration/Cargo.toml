@@ -1,0 +1,13 @@
+[package]
+name = "wip-integration"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"
+wip-core = { path = "../core" }
+
+[lints]
+workspace = true

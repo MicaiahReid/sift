@@ -1,0 +1,42 @@
+[workspace]
+members = ["crates/types", "crates/core", "crates/cli", "crates/integration"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/solana-foundation/wip"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.23"
+bs58 = "0.5"
+clap = { version = "4.6", features = ["derive"] }
+directories = "6.0"
+dialoguer = "0.12"
+hex = "0.4"
+glob = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "fs"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2.5", features = ["serde"] }
+walkdir = "2.5"
+wincode = { version = "0.6", features = ["alloc"] }
+solana-address = { version = "2.7", features = ["decode"] }
+solana-hash = "4.6"
+solana-instruction = "3.5"
+solana-message = { version = "5.0", features = ["std", "wincode"] }
+solana-signature = "3.3"
+solana-transaction = { version = "5.0", features = ["wincode"] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
