@@ -145,7 +145,10 @@ impl Registry {
             return Ok(LoadedSchema {
                 schema,
                 source: IdlSource::File {
-                    name: path.display().to_string(),
+                    name: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string()),
                     path: path.to_path_buf(),
                 },
             });

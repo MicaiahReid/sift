@@ -8,7 +8,7 @@ use wip_core::{Registry, RpcClient, decode_account, encode_account, find_account
 
 use crate::{
     ContextOptions,
-    tui::{DecodedAccount, RequestMetadata, account_list_json, run, should_run},
+    tui::{DecodedAccount, RequestMetadata, account_document, account_list_json, run, should_run},
     utils::{
         BytesFormat, parse_assignment, print_bytes, read_value_json, resolve_schema,
         resolve_schema_with_source,
@@ -108,7 +108,12 @@ impl AccountCommand {
                     "selected account-list presentation"
                 );
                 if use_tui {
-                    run(&result, &layout.ty, &schema.types, metadata)?;
+                    run(account_document(
+                        &result,
+                        &layout.ty,
+                        &schema.types,
+                        metadata,
+                    ))?;
                 } else {
                     println!(
                         "{}",

@@ -10,6 +10,7 @@ use wip_types::IdlSource;
 
 use crate::{
     ContextOptions,
+    tui::{idl_document, run, should_run},
     utils::{print_status, resolve_schema},
 };
 
@@ -39,8 +40,12 @@ enum IdlSubcommand {
         #[arg(long)]
         alias: Option<String>,
     },
-    /// Print the registry as JSON.
-    List,
+    /// Browse the registry interactively when possible, otherwise print JSON.
+    List {
+        /// Print the registry JSON instead of opening the interactive browser.
+        #[arg(long)]
+        no_tui: bool,
+    },
     /// Show the resolved normalized program schema.
     Show {
         /// Program alias or base58 address.
@@ -69,10 +74,10 @@ impl IdlCommand {
                 alias,
             } => {
                 let source = match (file, url, onchain) {
-                    (Some(path), None, false) => IdlSource::File {
-                        name: path.display().to_string(),
-                        path,
-                    },
+                    (Some(path), None, false) => {
+                        let name = file_source_name(&path);
+                        IdlSource::File { name, path }
+                    }
                     (None, Some(url), false) => IdlSource::Url {
                         name: url.to_string(),
                         url,
@@ -88,7 +93,20 @@ impl IdlCommand {
                 registry.save().await?;
                 print_status(&format!("Registered IDL for {program}"));
             }
-            IdlSubcommand::List => println!("{}", serde_json::to_string_pretty(&registry.json())?),
+            IdlSubcommand::List { no_tui } => {
+                let use_tui = should_run(no_tui, !registry.config.programs.is_empty());
+                debug!(
+                    no_tui,
+                    program_count = registry.config.programs.len(),
+                    use_tui,
+                    "selected IDL-list presentation"
+                );
+                if use_tui {
+                    run(idl_document(registry))?;
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&registry.json())?);
+                }
+            }
             IdlSubcommand::Show { program } => println!(
                 "{}",
                 serde_json::to_string_pretty(&resolve_schema(registry, &program, context).await?)?
@@ -105,4 +123,10 @@ impl IdlCommand {
         }
         Ok(())
     }
+}
+
+fn file_source_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }

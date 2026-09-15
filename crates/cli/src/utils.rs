@@ -179,7 +179,7 @@ pub(crate) async fn resolve_schema_with_source(
                     registry.add_source_with_aliases(
                         &address,
                         IdlSource::File {
-                            name: selected.idl_path.display().to_string(),
+                            name: file_source_name(&selected.idl_path),
                             path: selected.idl_path.clone(),
                         },
                         anchor_program_aliases(&selected.program_name),
@@ -200,6 +200,12 @@ pub(crate) async fn resolve_schema_with_source(
             }
         }
     }
+}
+
+fn file_source_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Formats the actual selected IDL source for compact terminal presentation.
