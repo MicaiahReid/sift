@@ -42,10 +42,13 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Inspect or rewrite program-owned account data.
+    #[command(visible_alias = "accounts")]
     Account(commands::account::AccountCommand),
     /// Build an unsigned transaction.
+    #[command(visible_alias = "transactions")]
     Transaction(commands::transaction::TransactionCommand),
     /// Manage persistent IDL sources.
+    #[command(visible_alias = "idls")]
     Idl(commands::idl::IdlCommand),
     /// Serve the registry and account tools to AI agents over MCP on stdio.
     Mcp,
