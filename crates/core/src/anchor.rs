@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sift_types::{
-    AccountSchema, Discriminator, ErrorSchema, FieldSchema, InstructionAccountSchema,
+    AccountSchema, Discriminator, ErrorSchema, FieldSchema, IdlFormat, InstructionAccountSchema,
     InstructionSchema, OptionalAccountStrategy, ProgramSchema,
 };
 use tracing::debug;
@@ -85,6 +85,7 @@ pub fn parse_anchor(root: &Value, program_address: &str) -> Result<ProgramSchema
     );
     Ok(ProgramSchema {
         name,
+        format: IdlFormat::Anchor,
         address: program_address.to_owned(),
         accounts,
         instructions,

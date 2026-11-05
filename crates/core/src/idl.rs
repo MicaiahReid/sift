@@ -2,29 +2,11 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+pub use sift_types::IdlFormat;
 use sift_types::{AccountSchema, InstructionSchema, ProgramSchema};
 use tracing::trace;
 
 use crate::{anchor::parse_anchor, codama::parse_codama};
-
-/// The dialect an IDL document is written in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IdlFormat {
-    /// A legacy or 0.30+ Anchor IDL.
-    Anchor,
-    /// A Codama `rootNode` or `programNode` document.
-    Codama,
-}
-
-impl IdlFormat {
-    /// Human-readable dialect name.
-    pub fn label(self) -> &'static str {
-        match self {
-            IdlFormat::Anchor => "Anchor",
-            IdlFormat::Codama => "Codama",
-        }
-    }
-}
 
 /// Identifies the dialect of a parsed IDL document, or `None` for unrelated JSON.
 pub fn detect_format(root: &Value) -> Option<IdlFormat> {
@@ -108,6 +90,7 @@ mod tests {
         let input = r#"{"kind":"rootNode","program":{"kind":"programNode","name":"demo","publicKey":"11111111111111111111111111111111","accounts":[{"kind":"accountNode","name":"state","data":{"kind":"structTypeNode","fields":[{"kind":"structFieldTypeNode","name":"count","type":{"kind":"numberTypeNode","format":"u64","endian":"le"}}]}}],"instructions":[{"kind":"instructionNode","name":"increment","arguments":[{"kind":"instructionArgumentNode","name":"amount","type":{"kind":"numberTypeNode","format":"u64","endian":"le"}}],"accounts":[{"kind":"instructionAccountNode","name":"state","isSigner":false,"isWritable":true}]}],"definedTypes":[]}}"#;
         let schema = parse_idl(input, "11111111111111111111111111111111").unwrap();
         assert_eq!(schema.name, "demo");
+        assert_eq!(schema.format, IdlFormat::Codama);
         assert_eq!(schema.accounts.len(), 1);
         assert_eq!(schema.accounts[0].ty["kind"], "structTypeNode");
         assert!(schema.instructions[0].accounts[0].writable);
@@ -117,6 +100,7 @@ mod tests {
     fn parses_an_anchor_document_into_codama_types() {
         let input = r#"{"name":"demo","accounts":[{"name":"State","type":{"kind":"struct","fields":[{"name":"count","type":"u64"}]}}],"instructions":[]}"#;
         let schema = parse_idl(input, "11111111111111111111111111111111").unwrap();
+        assert_eq!(schema.format, IdlFormat::Anchor);
         assert_eq!(
             schema.accounts[0].ty["fields"][1]["type"]["kind"],
             "numberTypeNode"

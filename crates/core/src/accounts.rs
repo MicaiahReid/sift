@@ -165,6 +165,7 @@ mod tests {
     fn schema() -> ProgramSchema {
         ProgramSchema {
             name: "demo".into(),
+            format: sift_types::IdlFormat::Codama,
             address: "11111111111111111111111111111111".into(),
             accounts: vec![
                 AccountSchema {

@@ -224,6 +224,7 @@ pub fn schema_summary(schema: &ProgramSchema) -> Value {
         .collect::<Vec<_>>();
     json!({
         "name": schema.name,
+        "format": schema.format,
         "address": schema.address,
         "accounts": accounts,
         "instructions": instructions,

@@ -306,7 +306,11 @@ pub(crate) fn idl_schema_document(schema: &ProgramSchema, idl_location: String) 
                     schema.name.clone(),
                     Some(("Address", schema.address.clone())),
                 ),
-                row("IDL", idl_location, None),
+                row(
+                    "IDL",
+                    idl_location,
+                    Some(("Format", schema.format.label().to_owned())),
+                ),
             ],
         },
         raw,

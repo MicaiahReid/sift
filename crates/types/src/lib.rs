@@ -62,6 +62,26 @@ pub enum IdlSource {
     },
 }
 
+/// The dialect an IDL document is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdlFormat {
+    /// A legacy or 0.30+ Anchor IDL.
+    Anchor,
+    /// A Codama `rootNode` or `programNode` document.
+    Codama,
+}
+
+impl IdlFormat {
+    /// Human-readable dialect name.
+    pub fn label(self) -> &'static str {
+        match self {
+            IdlFormat::Anchor => "Anchor",
+            IdlFormat::Codama => "Codama",
+        }
+    }
+}
+
 /// A normalized representation of one usable program IDL.
 ///
 /// Every type expression (`ty`, `types`, argument types) is a Codama type node
@@ -72,6 +92,8 @@ pub enum IdlSource {
 pub struct ProgramSchema {
     /// Friendly IDL program name, if one was declared.
     pub name: String,
+    /// Dialect of the IDL document this schema was parsed from.
+    pub format: IdlFormat,
     /// Program base58 address supplied by the caller or IDL metadata.
     pub address: String,
     /// Account layouts selectable by account discriminator and name.
