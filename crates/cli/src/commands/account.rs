@@ -2,12 +2,13 @@
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sift_types::{AccountSchema, ProgramSchema};
 use tokio::sync::mpsc;
 
 use sift_core::{
-    Registry, RpcClient, decode_account_with_info, encode_account, find_account, patch_value,
+    Registry, RpcClient, decode_account_with_info, discriminator_filter, encode_account,
+    find_account, patch_value,
 };
 use tracing::debug;
 
@@ -89,7 +90,7 @@ impl AccountCommand {
                     rpc_url: rpc.url.clone(),
                     commitment: rpc.commitment.clone(),
                 };
-                let filters = json!([{ "memcmp": { "offset": 0, "bytes": bs58::encode(&layout.discriminator).into_string() }}]);
+                let filters = discriminator_filter(layout);
                 if should_run(no_tui, true) {
                     return browse_accounts(rpc, schema, account_type, metadata, filters).await;
                 }
@@ -156,24 +157,17 @@ fn decode_accounts(
     layout: &AccountSchema,
     schema: &ProgramSchema,
 ) -> Vec<DecodedAccount> {
-    accounts.into_iter().filter_map(|(address, bytes)| {
-        match decode_account_with_info(layout, &schema.types, &bytes) {
-            Ok((data, info)) => Some(DecodedAccount {
-                address,
-                account_type: layout.name.clone(),
-                data,
-                seeds: None,
-                note: info.has_unmodelled_data().then(|| format!(
-                    "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
-                    info.trailing_byte_count, info.non_zero_trailing_byte_count,
-                )),
-            }),
-            Err(error) => {
-                debug!(account = %layout.name, byte_length = bytes.len(), error = %error, "failed to decode account data");
-                None
-            }
-        }
-    }).collect()
+    sift_core::decode_accounts(accounts, layout, schema)
+        .accounts
+        .into_iter()
+        .map(|account| DecodedAccount {
+            address: account.address,
+            account_type: account.account_type,
+            data: account.data,
+            seeds: None,
+            note: account.note,
+        })
+        .collect()
 }
 
 async fn browse_accounts(

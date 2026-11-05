@@ -97,6 +97,27 @@ pub fn parse_cli_value(input: &str) -> Value {
     serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_owned()))
 }
 
+/// Reads the value at a dotted field and bracket-index path, or `None` when absent.
+///
+/// Returns an error only when the path itself is malformed; a path that does
+/// not exist in the value is not an error.
+pub fn lookup_path<'a>(target: &'a Value, path: &str) -> Result<Option<&'a Value>> {
+    let mut cursor = target;
+    for token in parse_path(path)? {
+        cursor = match token {
+            PathToken::Field(name) => match cursor.get(&name) {
+                Some(next) => next,
+                None => return Ok(None),
+            },
+            PathToken::Index(index) => match cursor.get(index) {
+                Some(next) => next,
+                None => return Ok(None),
+            },
+        };
+    }
+    Ok(Some(cursor))
+}
+
 /// Applies a dotted field and bracket-index path to a decoded dynamic value.
 pub fn patch_value(target: &mut Value, path: &str, replacement: Value) -> Result<()> {
     let tokens = parse_path(path)?;

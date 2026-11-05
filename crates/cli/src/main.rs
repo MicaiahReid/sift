@@ -47,6 +47,8 @@ enum Command {
     Transaction(commands::transaction::TransactionCommand),
     /// Manage persistent IDL sources.
     Idl(commands::idl::IdlCommand),
+    /// Serve the registry and account tools to AI agents over MCP on stdio.
+    Mcp,
 }
 
 /// Globally configured values shared by individual command implementations.
@@ -81,9 +83,11 @@ fn init_logging(verbose: u8) {
         _ => "sift=trace,sift_core=trace,warn",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
+    // Stdout carries JSON, encoded bytes, and the MCP protocol; diagnostics must not mix in.
     fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
 }
@@ -100,5 +104,13 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Account(command) => command.execute(&mut registry, &context).await,
         Command::Transaction(command) => command.execute(&mut registry, &context).await,
         Command::Idl(command) => command.execute(&mut registry, &context).await,
+        Command::Mcp => {
+            let options = sift_mcp::ServerOptions {
+                url: context.url,
+                commitment: context.commitment,
+                workdir: std::env::current_dir().ok(),
+            };
+            sift_mcp::run_stdio(sift_mcp::SiftServer::new(registry, options)).await
+        }
     }
 }
