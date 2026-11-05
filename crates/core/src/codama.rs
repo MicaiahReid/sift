@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sift_types::{
-    AccountSchema, Discriminator, ErrorSchema, FieldSchema, InstructionAccountSchema,
+    AccountSchema, Discriminator, ErrorSchema, FieldSchema, IdlFormat, InstructionAccountSchema,
     InstructionSchema, OptionalAccountStrategy, ProgramSchema,
 };
 use tracing::{debug, warn};
@@ -100,6 +100,7 @@ pub fn parse_codama(root: &Value, program_address: &str) -> Result<ProgramSchema
     );
     Ok(ProgramSchema {
         name,
+        format: IdlFormat::Codama,
         address: program_address.to_owned(),
         accounts,
         instructions,
