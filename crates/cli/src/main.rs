@@ -47,6 +47,8 @@ enum Command {
     Transaction(commands::transaction::TransactionCommand),
     /// Manage persistent IDL sources.
     Idl(commands::idl::IdlCommand),
+    /// Serve the registry and account tools to AI agents over MCP on stdio.
+    Mcp,
 }
 
 /// Globally configured values shared by individual command implementations.
@@ -100,5 +102,13 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Account(command) => command.execute(&mut registry, &context).await,
         Command::Transaction(command) => command.execute(&mut registry, &context).await,
         Command::Idl(command) => command.execute(&mut registry, &context).await,
+        Command::Mcp => {
+            let options = sift_mcp::ServerOptions {
+                url: context.url,
+                commitment: context.commitment,
+                workdir: std::env::current_dir().ok(),
+            };
+            sift_mcp::run_stdio(sift_mcp::SiftServer::new(registry, options)).await
+        }
     }
 }

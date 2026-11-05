@@ -34,6 +34,38 @@ browse or quit while requests are in flight. JSON viewing and copying include
 all discovered addresses, with a `status` for pending or unavailable accounts.
 With `--no-tui` or piped output, the command prints the complete decoded JSON.
 
+## MCP server for AI agents
+
+`sift mcp` serves the same registry and account tooling to AI agents over the
+Model Context Protocol on stdio. Global options such as `--url`, `--commitment`,
+and `--config` set the server defaults; most tools also accept a per-call
+`rpc_url`. Register it with an agent, for example in Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "sift": { "command": "sift", "args": ["mcp", "--url", "mainnet"] }
+  }
+}
+```
+
+Tools:
+
+| Tool | Purpose |
+|---|---|
+| `idl_list` | Registered programs, aliases, and IDL sources. |
+| `idl_add` / `idl_alias` / `idl_prefer` / `idl_remove` | Registry management, matching the CLI. |
+| `idl_show` | Compact schema summary, or one definition expanded with its referenced types. |
+| `account_list` | Decoded accounts of one type with server-side `where` filters, `fields` projection, `sort_by`, `aggregate` (sum/min/max/avg/count), and `limit`/`offset` paging. Decoded results are cached for 60 seconds. |
+| `account_get` | Decode one address; the owner's IDL is used when `program` is omitted. |
+| `account_patch` | Offline byte patching, identical to `sift account patch`. |
+| `transaction_build` | Unsigned transaction for one instruction. |
+
+Programs without a registered IDL are registered automatically from the
+canonical on-chain Program Metadata IDL when one exists; the response notes
+when that happens. The registry resource `sift://registry` exposes the raw
+registry JSON.
+
 ## Configuration
 
 The default registry is `~/.config/sift/registry.toml` (or the platform

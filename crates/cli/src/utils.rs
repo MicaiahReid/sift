@@ -192,17 +192,18 @@ pub(crate) async fn resolve_schema_with_source(
                     candidate_count = candidates.len(),
                     "local IDL discovery found candidates"
                 );
-                if context.no_input && candidates.len() > 1 {
-                    if let Some(onchain) = onchain {
-                        warn!(
-                            program,
-                            "local IDL discovery is ambiguous; using canonical on-chain IDL"
-                        );
-                        return Ok(ResolvedSchema {
-                            schema: parse_idl(&onchain.text, &address)?,
-                            idl_location: format!("on-chain IDL ({})", onchain.address),
-                        });
-                    }
+                if context.no_input
+                    && candidates.len() > 1
+                    && let Some(onchain) = onchain
+                {
+                    warn!(
+                        program,
+                        "local IDL discovery is ambiguous; using canonical on-chain IDL"
+                    );
+                    return Ok(ResolvedSchema {
+                        schema: parse_idl(&onchain.text, &address)?,
+                        idl_location: format!("on-chain IDL ({})", onchain.address),
+                    });
                 }
                 let selected = select_candidate(&candidates, context.no_input)?;
                 debug!(path = %selected.idl_path.display(), program_name = %selected.program_name, "selected discovered local IDL");
