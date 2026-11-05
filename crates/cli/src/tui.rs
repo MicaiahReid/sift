@@ -12,7 +12,7 @@ use ratatui::{
 };
 use serde_json::{Map, Value, json};
 use sift_core::Registry;
-use sift_types::IdlSource;
+use sift_types::{IdlSource, ProgramSchema};
 use std::{
     collections::BTreeMap,
     io::IsTerminal,
@@ -229,6 +229,45 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
         },
     }
 }
+pub(crate) fn idl_schema_document(schema: &ProgramSchema, idl_location: String) -> BrowserDocument {
+    let raw = serde_json::to_value(schema).expect("program schema serializes");
+    let nodes = [
+        ("Accounts", "accounts", "account"),
+        ("Instructions", "instructions", "instruction"),
+        ("Types", "types", "type"),
+    ]
+    .into_iter()
+    .map(|(label, key, noun)| {
+        let value = &raw[key];
+        let mut node = generic_node(label, value);
+        if let Some(items) = value.as_array() {
+            node.children = items
+                .iter()
+                .map(|item| generic_node(item["name"].as_str().unwrap_or("unnamed"), item))
+                .collect();
+        }
+        node.preview = count_label(node.children.len(), noun);
+        node
+    })
+    .collect();
+    BrowserDocument {
+        title: "IDL schema".into(),
+        header: Header {
+            title: "Program".into(),
+            rows: vec![
+                row(
+                    "Name",
+                    schema.name.clone(),
+                    Some(("Address", schema.address.clone())),
+                ),
+                row("IDL", idl_location, None),
+            ],
+        },
+        raw,
+        nodes,
+    }
+}
+
 fn row(label: &str, value: String, right: Option<(&str, String)>) -> Row {
     Row {
         left: Field {
@@ -917,6 +956,38 @@ mod tests {
             document.nodes[0].children[1].children[0]
                 .preview
                 .contains("example.json")
+        );
+    }
+
+    #[test]
+    fn schema_browser_navigates_named_entries_and_preserves_json() {
+        let schema = sift_core::parse_idl(
+            &json!({
+                "name": "example",
+                "accounts": [{"name":"State", "type":account_type()}],
+                "instructions": [{"name":"ping", "accounts":[], "args":[]}],
+                "types": [{"name":"Counter", "type":{"kind":"struct", "fields":[]}}]
+            })
+            .to_string(),
+            "11111111111111111111111111111111",
+        )
+        .unwrap();
+        let document = idl_schema_document(&schema, "example.json".into());
+        assert_eq!(document.raw, serde_json::to_value(&schema).unwrap());
+        assert_eq!(document.nodes[0].preview, "1 account");
+        assert_eq!(document.nodes[0].children[0].label, "State");
+        assert_eq!(document.nodes[1].children[0].label, "ping");
+        assert_eq!(document.nodes[2].children[0].label, "Counter");
+
+        let mut app = App::new(document);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.view.title, "Accounts");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.view.title, "State");
+        app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(
+            serde_json::from_str::<Value>(&app.raw.as_ref().unwrap().text).unwrap(),
+            serde_json::to_value(&schema.accounts[0]).unwrap()
         );
     }
 

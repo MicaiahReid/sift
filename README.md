@@ -12,6 +12,7 @@ sift --url mainnet idl add PROGRAM --onchain
 sift idl prefer PROGRAM local-1
 sift idl alias PROGRAM example
 sift idl alias example another-alias
+sift idl show example
 sift account list State --program PROGRAM
 sift account patch ADDRESS --program PROGRAM --set authority=NEW_ADDRESS
 sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg amount=10
@@ -19,6 +20,10 @@ sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg 
 
 The CLI never signs or sends a transaction. `transaction build` emits a
 serialized unsigned wire transaction, base64 by default.
+
+`idl list` and `idl show` open an interactive browser in a terminal. Use Enter
+to drill in, Esc to go back, `r` to view JSON, `c` to copy, and `q` to quit.
+Pass `--no-tui` or pipe the output to print JSON.
 
 ## Configuration
 

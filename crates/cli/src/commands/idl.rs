@@ -10,8 +10,8 @@ use tracing::debug;
 
 use crate::{
     ContextOptions,
-    tui::{idl_document, run, should_run},
-    utils::{print_status, resolve_schema},
+    tui::{idl_document, idl_schema_document, run, should_run},
+    utils::{print_status, resolve_schema_with_source},
 };
 
 /// IDL registry command group.
@@ -60,10 +60,13 @@ enum IdlSubcommand {
         #[arg(long)]
         no_tui: bool,
     },
-    /// Show the resolved normalized program schema.
+    /// Browse the resolved normalized program schema, otherwise print JSON.
     Show {
         /// Program alias or base58 address.
         program: String,
+        /// Print the schema JSON instead of opening the interactive browser.
+        #[arg(long)]
+        no_tui: bool,
     },
     /// Remove a program and all of its registered sources.
     Remove {
@@ -138,10 +141,14 @@ impl IdlCommand {
                 registry.save().await?;
                 print_status(&format!("Preferred IDL source {source} for {program}"));
             }
-            IdlSubcommand::Show { program } => println!(
-                "{}",
-                serde_json::to_string_pretty(&resolve_schema(registry, &program, context).await?)?
-            ),
+            IdlSubcommand::Show { program, no_tui } => {
+                let resolved = resolve_schema_with_source(registry, &program, context).await?;
+                if should_run(no_tui, true) {
+                    run(idl_schema_document(&resolved.schema, resolved.idl_location))?;
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&resolved.schema)?);
+                }
+            }
             IdlSubcommand::Remove { program } => {
                 debug!(program, "removing IDL registry entry");
                 let address = registry.program_address(&program)?;
