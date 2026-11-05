@@ -15,7 +15,9 @@ use sift_types::{
 use tracing::{debug, warn};
 
 use crate::codec::{encode_constant, encode_type};
-use crate::nodes::{self, fixed_size_of, kind, shape, struct_fields, value_node_to_json};
+use crate::nodes::{
+    self, fixed_size_of, kind, resolve_link, shape, struct_fields, value_node_to_json,
+};
 
 /// Converts a parsed Codama document into a schema.
 pub fn parse_codama(root: &Value, program_address: &str) -> Result<ProgramSchema> {
@@ -309,8 +311,7 @@ pub fn infer_discriminator(
     ty: &Value,
     types: &BTreeMap<String, Value>,
 ) -> Option<Discriminator> {
-    let (offset, field_ty) = find_discriminator_field(ty, types, 0, 0)?;
-    let shaped = shape(field_ty, types);
+    let (offset, shaped) = find_discriminator_field(ty, types, 0, 0)?;
     let (value, size_node) = match kind(shaped)? {
         "enumTypeNode" => (
             enum_variant_value(shaped, account_name)?,
@@ -339,6 +340,9 @@ pub fn infer_discriminator(
 }
 
 /// Finds the first fixed-offset field named like an account discriminator.
+///
+/// Returns the byte offset of the field's value and the field's shape with
+/// links and encoding wrappers removed.
 fn find_discriminator_field<'a>(
     ty: &'a Value,
     types: &'a BTreeMap<String, Value>,
@@ -348,12 +352,14 @@ fn find_discriminator_field<'a>(
     if depth > 8 {
         return None;
     }
-    let mut offset = offset;
-    for field in struct_fields(shape(ty, types))? {
+    let (prefix, shaped) = unwrap_with_offset(ty, types)?;
+    let mut offset = offset + prefix;
+    for field in struct_fields(shaped)? {
         let name = field.get("name").and_then(Value::as_str)?;
         let field_ty = field.get("type")?;
         if is_discriminator_name(name) {
-            return Some((offset, field_ty));
+            let (prefix, shaped) = unwrap_with_offset(field_ty, types)?;
+            return Some((offset + prefix, shaped));
         }
         if kind(shape(field_ty, types)) == Some("structTypeNode")
             && let Some(found) = find_discriminator_field(field_ty, types, offset, depth + 1)
@@ -361,6 +367,49 @@ fn find_discriminator_field<'a>(
             return Some(found);
         }
         offset += fixed_size_of(field_ty, types)?;
+    }
+    None
+}
+
+/// Resolves links and strips encoding wrappers like [`shape`], also returning
+/// how many bytes those wrappers place before the inner value.
+///
+/// Size prefixes, hidden prefixes, and forward pre-offsets shift the value;
+/// wrappers whose shift cannot be known without the data yield `None`.
+fn unwrap_with_offset<'a>(
+    ty: &'a Value,
+    types: &'a BTreeMap<String, Value>,
+) -> Option<(usize, &'a Value)> {
+    let mut current = resolve_link(ty, types);
+    let mut offset = 0;
+    for _ in 0..32 {
+        let next = match kind(current)? {
+            "fixedSizeTypeNode"
+            | "hiddenSuffixTypeNode"
+            | "postOffsetTypeNode"
+            | "sentinelTypeNode" => current.get("type")?,
+            "sizePrefixTypeNode" => {
+                offset += fixed_size_of(current.get("prefix")?, types)?;
+                current.get("type")?
+            }
+            "hiddenPrefixTypeNode" => {
+                for constant in current.get("prefix")?.as_array()? {
+                    offset += encode_constant(constant, types).ok()?.len();
+                }
+                current.get("type")?
+            }
+            "preOffsetTypeNode" => {
+                let strategy = current.get("strategy").and_then(Value::as_str);
+                if !matches!(strategy, None | Some("relative" | "padded")) {
+                    return None;
+                }
+                offset += usize::try_from(current.get("offset")?.as_i64()?).ok()?;
+                current.get("type")?
+            }
+            "amountTypeNode" | "dateTimeTypeNode" | "solAmountTypeNode" => current.get("number")?,
+            _ => return Some((offset, current)),
+        };
+        current = resolve_link(next, types);
     }
     None
 }
@@ -375,13 +424,12 @@ fn is_discriminator_name(name: &str) -> bool {
 /// Returns the discriminator value of the variant named after `account_name`.
 fn enum_variant_value(enum_node: &Value, account_name: &str) -> Option<i64> {
     let wanted = normalize_name(account_name);
-    let mut next = 0_i64;
-    for variant in enum_node.get("variants")?.as_array()? {
+    for (index, variant) in enum_node.get("variants")?.as_array()?.iter().enumerate() {
+        // Codama defaults a variant's discriminator to its index.
         let value = variant
             .get("discriminator")
             .and_then(Value::as_i64)
-            .unwrap_or(next);
-        next = value + 1;
+            .unwrap_or(i64::try_from(index).ok()?);
         if kind(variant) == Some("enumEmptyVariantTypeNode")
             && variant
                 .get("name")
@@ -507,6 +555,29 @@ mod tests {
         );
         assert_eq!(decoded["amount"], "5");
         assert!(decode_account(&schema.accounts[0], &schema.types, &raw).is_err());
+    }
+
+    /// A size-prefixed header moves the tag past the length prefix; the
+    /// inferred offset and RPC filter must move with it.
+    #[test]
+    fn infers_discriminator_offsets_through_encoding_wrappers() {
+        let mut idl = subscriptions_like_idl();
+        idl["program"]["accounts"][1]["data"] = nodes::size_prefix(
+            struct_node(vec![
+                struct_field("header", defined_link("header")),
+                struct_field("amount", number("u64")),
+            ]),
+            number("u32"),
+        );
+        let schema = parse_codama(&idl, ADDRESS).unwrap();
+        assert_eq!(
+            schema.accounts[1].discriminators,
+            vec![Discriminator::Constant {
+                offset: 4,
+                bytes: vec![2],
+                inferred: true
+            }]
+        );
     }
 
     #[test]

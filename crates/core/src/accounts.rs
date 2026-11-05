@@ -76,7 +76,7 @@ pub fn decode_accounts(
                 data,
                 note: info.has_unmodelled_data().then(|| {
                     format!(
-                        "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
+                        "Parsed with {} unmodelled byte(s) ({} non-zero); the IDL does not describe this data.",
                         info.trailing_byte_count, info.non_zero_trailing_byte_count,
                     )
                 }),

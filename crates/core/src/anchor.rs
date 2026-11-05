@@ -439,7 +439,14 @@ fn convert_struct(object: &Map<String, Value>) -> Result<Value> {
                         .with_context(|| format!("field {name} lacks type"))?,
                 )
                 .with_context(|| format!("field {name}"))?;
-                Ok(nodes::struct_field(&name, ty))
+                let mut node = nodes::struct_field(&name, ty);
+                if let Some(docs) = field
+                    .get("docs")
+                    .filter(|docs| docs.as_array().is_some_and(|docs| !docs.is_empty()))
+                {
+                    node["docs"] = docs.clone();
+                }
+                Ok(node)
             })
             .collect::<Result<Vec<_>>>()?,
     ))

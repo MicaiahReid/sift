@@ -122,7 +122,7 @@ impl AccountCommand {
                     decode_account_with_info(layout, &schema.types, &bytes)?;
                 if decode_info.has_unmodelled_data() {
                     bail!(
-                        "cannot patch {}: the IDL does not describe {} trailing byte(s), {} of which are non-zero; patching would discard them",
+                        "cannot patch {}: the IDL does not describe {} byte(s), {} of which are non-zero; patching would discard them",
                         layout.name,
                         decode_info.trailing_byte_count,
                         decode_info.non_zero_trailing_byte_count,
