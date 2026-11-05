@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+borsh.workspace = true
 bs58.workspace = true
 directories.workspace = true
+flate2.workspace = true
 hex.workspace = true
 glob.workspace = true
 reqwest.workspace = true
@@ -29,6 +31,7 @@ solana-message.workspace = true
 solana-signature.workspace = true
 solana-transaction.workspace = true
 sift-types = { path = "../types" }
+spl-program-metadata-client = { git = "https://github.com/solana-program/program-metadata.git", rev = "c3f6c6de46c17305970ddca53e39ea7776a45883" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,7 +10,10 @@ use clap::ValueEnum;
 use dialoguer::{Confirm, Select, console::style, theme::ColorfulTheme};
 use directories::BaseDirs;
 use serde_json::{Value, json};
-use sift_core::{LocalIdlCandidate, Registry, discover_local_idls, parse_cli_value};
+use sift_core::{
+    LocalIdlCandidate, Registry, RpcClient, discover_canonical_idl, discover_local_idls,
+    parse_cli_value, parse_idl,
+};
 use sift_types::{IdlSource, ProgramSchema};
 use tracing::{debug, warn};
 
@@ -122,8 +125,9 @@ pub(crate) async fn resolve_schema_with_source(
     context: &ContextOptions,
 ) -> Result<ResolvedSchema> {
     debug!(program, explicit_idl = ?context.idl, "attempting schema resolution");
+    let rpc = RpcClient::new(context.url.clone(), context.commitment.clone())?;
     match registry
-        .load_schema_with_source(program, context.idl.as_deref())
+        .load_schema_with_source(program, context.idl.as_deref(), &rpc)
         .await
     {
         Ok(loaded) => {
@@ -142,18 +146,64 @@ pub(crate) async fn resolve_schema_with_source(
             let current_dir =
                 std::env::current_dir().context("cannot determine current directory")?;
             let candidates = discover_local_idls(&current_dir, &address)?;
+            let onchain = discover_canonical_idl(&rpc, &address).await.ok();
             if candidates.is_empty() {
-                warn!(
-                    program,
-                    address, "local IDL discovery found no matching candidates"
-                );
-                Err(initial_error.context("no matching local Anchor IDL was discovered"))
+                let Some(onchain) = onchain else {
+                    warn!(
+                        program,
+                        address, "no local or canonical on-chain IDL was discovered"
+                    );
+                    return Err(initial_error
+                        .context("no matching local or canonical on-chain IDL was discovered"));
+                };
+                let source = IdlSource::OnChain {
+                    name: "canonical-onchain".to_owned(),
+                    address: onchain.address.clone(),
+                };
+                if context.no_input || !std::io::stdin().is_terminal() {
+                    return Ok(ResolvedSchema {
+                        schema: parse_idl(&onchain.text, &address)?,
+                        idl_location: idl_source_location(&source),
+                    });
+                }
+                let accept = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!(
+                        "Register discovered on-chain IDL {}?",
+                        onchain.address
+                    ))
+                    .default(true)
+                    .interact_opt()?
+                    .unwrap_or(false);
+                if !accept {
+                    return Err(initial_error.context("discovered on-chain IDL was not registered"));
+                }
+                registry.add_source(&address, source, None)?;
+                registry.save().await?;
+                let loaded = registry
+                    .load_schema_with_source(program, None, &rpc)
+                    .await?;
+                Ok(ResolvedSchema {
+                    idl_location: idl_source_location(&loaded.source),
+                    schema: loaded.schema,
+                })
             } else {
                 debug!(
                     program,
                     candidate_count = candidates.len(),
                     "local IDL discovery found candidates"
                 );
+                if context.no_input && candidates.len() > 1 {
+                    if let Some(onchain) = onchain {
+                        warn!(
+                            program,
+                            "local IDL discovery is ambiguous; using canonical on-chain IDL"
+                        );
+                        return Ok(ResolvedSchema {
+                            schema: parse_idl(&onchain.text, &address)?,
+                            idl_location: format!("on-chain IDL ({})", onchain.address),
+                        });
+                    }
+                }
                 let selected = select_candidate(&candidates, context.no_input)?;
                 debug!(path = %selected.idl_path.display(), program_name = %selected.program_name, "selected discovered local IDL");
                 if context.no_input || !std::io::stdin().is_terminal() {
@@ -161,8 +211,27 @@ pub(crate) async fn resolve_schema_with_source(
                         "Using discovered IDL temporarily: {}",
                         display_path(&selected.idl_path)
                     ));
-                    let loaded = registry
-                        .load_schema_with_source(program, Some(&selected.idl_path))
+                    let mut transient = registry.clone();
+                    if let Some(onchain) = onchain {
+                        transient.add_source(
+                            &address,
+                            IdlSource::OnChain {
+                                name: "canonical-onchain".to_owned(),
+                                address: onchain.address,
+                            },
+                            None,
+                        )?;
+                    }
+                    transient.add_source(
+                        &address,
+                        IdlSource::File {
+                            name: file_source_name(&selected.idl_path),
+                            path: selected.idl_path.clone(),
+                        },
+                        None,
+                    )?;
+                    let loaded = transient
+                        .load_schema_with_source(program, None, &rpc)
                         .await?;
                     let idl_location = idl_source_location(&loaded.source);
                     Ok(ResolvedSchema {
@@ -176,6 +245,26 @@ pub(crate) async fn resolve_schema_with_source(
                         display_path(&selected.idl_path)
                     )))
                 } else {
+                    if let Some(onchain) = onchain {
+                        let accept = Confirm::with_theme(&ColorfulTheme::default())
+                            .with_prompt(format!(
+                                "Register discovered on-chain IDL {}?",
+                                onchain.address
+                            ))
+                            .default(true)
+                            .interact_opt()?
+                            .unwrap_or(false);
+                        if accept {
+                            registry.add_source(
+                                &address,
+                                IdlSource::OnChain {
+                                    name: "canonical-onchain".to_owned(),
+                                    address: onchain.address,
+                                },
+                                None,
+                            )?;
+                        }
+                    }
                     registry.add_source_with_aliases(
                         &address,
                         IdlSource::File {
@@ -190,7 +279,9 @@ pub(crate) async fn resolve_schema_with_source(
                         "Registered discovered IDL: {}",
                         display_path(&selected.idl_path)
                     ));
-                    let loaded = registry.load_schema_with_source(program, None).await?;
+                    let loaded = registry
+                        .load_schema_with_source(program, None, &rpc)
+                        .await?;
                     let idl_location = idl_source_location(&loaded.source);
                     Ok(ResolvedSchema {
                         schema: loaded.schema,
@@ -213,10 +304,7 @@ fn idl_source_location(source: &IdlSource) -> String {
     match source {
         IdlSource::File { path, .. } => display_path(path),
         IdlSource::Url { url, .. } => url.to_string(),
-        IdlSource::OnChain { address, .. } => address.as_deref().map_or_else(
-            || "on-chain IDL".to_owned(),
-            |address| format!("on-chain IDL ({address})"),
-        ),
+        IdlSource::OnChain { address, .. } => format!("on-chain IDL ({address})"),
     }
 }
 

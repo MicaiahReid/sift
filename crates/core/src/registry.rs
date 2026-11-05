@@ -8,7 +8,7 @@ use serde_json::Value;
 use sift_types::{IdlSource, RegistryConfig};
 use tracing::{debug, warn};
 
-use crate::idl::parse_idl;
+use crate::{RpcClient, idl::parse_idl, load_canonical_idl};
 
 /// Local registry plus its filesystem location.
 #[derive(Clone, Debug)]
@@ -110,9 +110,31 @@ impl Registry {
         for alias in aliases {
             entry.aliases.insert(alias);
         }
-        entry.sources.retain(|existing| existing != &source);
-        entry.sources.insert(0, source);
+        let source_id = entry
+            .sources
+            .iter()
+            .find_map(|(id, existing)| (existing == &source).then(|| id.clone()))
+            .unwrap_or_else(|| next_source_id(&entry.sources, &source));
+        entry.sources.insert(source_id.clone(), source);
+        entry.priority.retain(|id| id != &source_id);
+        entry.priority.insert(0, source_id);
         debug!(program, aliases = ?entry.aliases, source_count = entry.sources.len(), "updated IDL registry entry");
+        Ok(())
+    }
+
+    /// Moves a configured source to the highest priority.
+    pub fn prefer_source(&mut self, program: &str, source_id: &str) -> Result<()> {
+        let address = self.program_address(program)?;
+        let entry = self
+            .config
+            .programs
+            .get_mut(&address)
+            .ok_or_else(|| anyhow::anyhow!("program {program} is not registered"))?;
+        if !entry.sources.contains_key(source_id) {
+            bail!("program {program} has no source named {source_id}")
+        }
+        entry.priority.retain(|id| id != source_id);
+        entry.priority.insert(0, source_id.to_owned());
         Ok(())
     }
 
@@ -121,9 +143,10 @@ impl Registry {
         &self,
         program: &str,
         explicit_idl: Option<&Path>,
+        rpc: &RpcClient,
     ) -> Result<sift_types::ProgramSchema> {
         Ok(self
-            .load_schema_with_source(program, explicit_idl)
+            .load_schema_with_source(program, explicit_idl, rpc)
             .await?
             .schema)
     }
@@ -133,6 +156,7 @@ impl Registry {
         &self,
         program: &str,
         explicit_idl: Option<&Path>,
+        rpc: &RpcClient,
     ) -> Result<LoadedSchema> {
         let address = self.program_address(program)?;
         debug!(program, address, explicit_idl = ?explicit_idl, "resolving program schema");
@@ -162,7 +186,11 @@ impl Registry {
             .redirect(reqwest::redirect::Policy::limited(3))
             .build()?;
         let mut errors = Vec::new();
-        for source in &entry.sources {
+        for source_id in &entry.priority {
+            let Some(source) = entry.sources.get(source_id) else {
+                errors.push(format!("priority references unknown source {source_id}"));
+                continue;
+            };
             debug!(address, source = ?source, "trying registered IDL source");
             let text = match source {
                 IdlSource::File { path, .. } => tokio::fs::read_to_string(path)
@@ -181,9 +209,12 @@ impl Registry {
                         .await
                         .map_err(anyhow::Error::from)
                 }
-                IdlSource::OnChain { .. } => Err(anyhow::anyhow!(
-                    "on-chain IDL fetch is not available in this build; register a file or URL source"
-                )),
+                IdlSource::OnChain {
+                    address: metadata_address,
+                    ..
+                } => load_canonical_idl(rpc, &address, metadata_address)
+                    .await
+                    .map(|idl| idl.text),
             };
             match text.and_then(|text| parse_idl(&text, &address)) {
                 Ok(schema) => {
@@ -206,6 +237,24 @@ impl Registry {
     pub fn json(&self) -> Value {
         serde_json::to_value(&self.config).expect("registry config serializes")
     }
+}
+
+fn next_source_id(
+    sources: &std::collections::BTreeMap<String, IdlSource>,
+    source: &IdlSource,
+) -> String {
+    let prefix = match source {
+        IdlSource::File { .. } => "local",
+        IdlSource::Url { .. } => "url",
+        IdlSource::OnChain { .. } => "onchain",
+    };
+    for number in 1.. {
+        let id = format!("{prefix}-{number}");
+        if !sources.contains_key(&id) {
+            return id;
+        }
+    }
+    unreachable!()
 }
 
 /// Validates that a value is a 32-byte base58 Solana public key.
@@ -245,6 +294,39 @@ mod tests {
         assert_eq!(registry.program_address("ncn-snapshot").unwrap(), ADDRESS);
     }
 
+    #[test]
+    fn promotes_a_stable_source_id_without_losing_fallbacks() {
+        let mut registry = Registry {
+            path: PathBuf::from("registry.toml"),
+            config: RegistryConfig::default(),
+        };
+        registry
+            .add_source(
+                ADDRESS,
+                IdlSource::File {
+                    name: "local".to_owned(),
+                    path: PathBuf::from("local.json"),
+                },
+                None,
+            )
+            .unwrap();
+        registry
+            .add_source(
+                ADDRESS,
+                IdlSource::Url {
+                    name: "remote".to_owned(),
+                    url: "https://example.test/idl.json".parse().unwrap(),
+                },
+                None,
+            )
+            .unwrap();
+        registry.prefer_source(ADDRESS, "local-1").unwrap();
+        assert_eq!(
+            registry.config.programs.get(ADDRESS).unwrap().priority,
+            ["local-1", "url-1"]
+        );
+    }
+
     #[tokio::test]
     async fn reports_the_explicit_idl_source_that_loaded_the_schema() {
         let directory = tempfile::tempdir().unwrap();
@@ -260,8 +342,13 @@ mod tests {
             config: RegistryConfig::default(),
         };
 
+        let rpc = RpcClient::new(
+            Some("http://127.0.0.1:1".to_owned()),
+            "confirmed".to_owned(),
+        )
+        .unwrap();
         let loaded = registry
-            .load_schema_with_source(ADDRESS, Some(&path))
+            .load_schema_with_source(ADDRESS, Some(&path), &rpc)
             .await
             .unwrap();
 
