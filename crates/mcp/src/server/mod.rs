@@ -68,7 +68,7 @@ pub struct ServerOptions {
     pub url: Option<String>,
     /// Default RPC commitment.
     pub commitment: String,
-    /// Directory searched for local Anchor IDLs when nothing is registered.
+    /// Directory searched for local Anchor or Codama IDLs when nothing is registered.
     pub workdir: Option<PathBuf>,
 }
 

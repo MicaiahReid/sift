@@ -1,81 +1,129 @@
 //! Compact, human- and agent-readable renderings of program schemas.
 //!
-//! A normalized [`ProgramSchema`] carries full type JSON for every account,
-//! instruction, and named type. These helpers reduce that to short signatures
-//! such as `Vec<Proposal>` or `{admin: pubkey, bump: u8}` so a caller can learn
-//! a program's shape without reading the whole IDL.
+//! A normalized [`ProgramSchema`] carries full Codama type nodes for every
+//! account, instruction, and named type. These helpers reduce that to short
+//! signatures such as `Vec<Proposal>` or `{admin: pubkey, bump: u8}` so a
+//! caller can learn a program's shape without reading the whole IDL.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 use sift_types::ProgramSchema;
 
-/// Renders an IDL type expression as a short signature string.
+use crate::nodes::{field_is_omitted, kind};
+
+/// Renders a Codama type node as a short signature string.
 ///
-/// Primitive names pass through unchanged, containers render as `Vec<T>`,
-/// `Option<T>`, `[T; N]`, and `HashMap<K, V>`, defined types render by name,
-/// and inline structs or enums render as `{field: T, ...}` or `A | B(T) | C{x: T}`.
+/// Numbers render as their format (`u64`, `u32be`), containers render as
+/// `Vec<T>`, `Option<T>`, `[T; N]`, `Set<T>`, `Map<K, V>` and `(A, B)`, defined
+/// types render by name, and inline structs or enums render as
+/// `{field: T, ...}` or `A | B(T) | C{x: T}`.
 pub fn type_label(ty: &Value) -> String {
-    match ty {
-        Value::String(name) => name.clone(),
-        Value::Object(object) => object_label(object),
-        other => other.to_string(),
+    let Some(node_kind) = kind(ty) else {
+        return ty.to_string();
+    };
+    let inner = || ty.get("type").map(type_label).unwrap_or_default();
+    match node_kind {
+        "numberTypeNode" => {
+            let format = ty.get("format").and_then(Value::as_str).unwrap_or("number");
+            if ty.get("endian").and_then(Value::as_str) == Some("be") {
+                format!("{format}be")
+            } else {
+                format.to_owned()
+            }
+        }
+        "booleanTypeNode" => "bool".to_owned(),
+        "publicKeyTypeNode" => "pubkey".to_owned(),
+        "stringTypeNode" => match ty.get("encoding").and_then(Value::as_str) {
+            None | Some("utf8") => "string".to_owned(),
+            Some(encoding) => format!("string({encoding})"),
+        },
+        "bytesTypeNode" => "bytes".to_owned(),
+        "sizePrefixTypeNode" => inner(),
+        "fixedSizeTypeNode" => {
+            let size = ty.get("size").map(Value::to_string).unwrap_or_default();
+            match ty.get("type").and_then(kind) {
+                Some("bytesTypeNode") => format!("[u8; {size}]"),
+                _ => format!("{}[{size}]", inner()),
+            }
+        }
+        "arrayTypeNode" => {
+            let item = ty.get("item").map(type_label).unwrap_or_default();
+            match ty.get("count") {
+                Some(count) if kind(count) == Some("fixedCountNode") => format!(
+                    "[{item}; {}]",
+                    count.get("value").map(Value::to_string).unwrap_or_default()
+                ),
+                _ => format!("Vec<{item}>"),
+            }
+        }
+        "setTypeNode" => format!(
+            "Set<{}>",
+            ty.get("item").map(type_label).unwrap_or_default()
+        ),
+        "mapTypeNode" => format!(
+            "Map<{}, {}>",
+            ty.get("key").map(type_label).unwrap_or_default(),
+            ty.get("value").map(type_label).unwrap_or_default()
+        ),
+        "optionTypeNode" | "zeroableOptionTypeNode" | "remainderOptionTypeNode" => {
+            format!(
+                "Option<{}>",
+                ty.get("item").map(type_label).unwrap_or_default()
+            )
+        }
+        "tupleTypeNode" => format!(
+            "({})",
+            ty.get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        "structTypeNode" => struct_label(ty),
+        "enumTypeNode" => enum_label(ty),
+        "definedTypeLinkNode" => ty
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_owned(),
+        "amountTypeNode" | "dateTimeTypeNode" | "solAmountTypeNode" => {
+            ty.get("number").map(type_label).unwrap_or_default()
+        }
+        "hiddenPrefixTypeNode"
+        | "hiddenSuffixTypeNode"
+        | "preOffsetTypeNode"
+        | "postOffsetTypeNode"
+        | "sentinelTypeNode" => inner(),
+        other => other.trim_end_matches("TypeNode").to_owned(),
     }
 }
 
-fn object_label(object: &Map<String, Value>) -> String {
-    if let Some(name) = object
-        .get("defined")
-        .and_then(|defined| defined.as_str().or_else(|| defined.get("name")?.as_str()))
-    {
-        return name.to_owned();
-    }
-    if let Some(inner) = object.get("vec") {
-        return format!("Vec<{}>", type_label(inner));
-    }
-    if let Some(inner) = object.get("option") {
-        return format!("Option<{}>", type_label(inner));
-    }
-    if let Some(inner) = object.get("coption") {
-        return format!("COption<{}>", type_label(inner));
-    }
-    if let Some(array) = object.get("array").and_then(Value::as_array)
-        && let [inner, length] = array.as_slice()
-    {
-        return format!("[{}; {length}]", type_label(inner));
-    }
-    if let Some(map) = object.get("hashMap").or_else(|| object.get("bTreeMap"))
-        && let Some([key, value]) = map.as_array().map(Vec::as_slice)
-    {
-        return format!("HashMap<{}, {}>", type_label(key), type_label(value));
-    }
-    match object.get("kind").and_then(Value::as_str) {
-        Some("struct") => struct_label(object),
-        Some("enum") => enum_label(object),
-        Some("type") => object.get("alias").map(type_label).unwrap_or_default(),
-        _ => Value::Object(object.clone()).to_string(),
-    }
-}
-
-fn struct_label(object: &Map<String, Value>) -> String {
-    let Some(fields) = object.get("fields").and_then(Value::as_array) else {
+fn struct_label(ty: &Value) -> String {
+    let Some(fields) = ty.get("fields").and_then(Value::as_array) else {
         return "{}".to_owned();
     };
-    let rendered = fields.iter().map(field_label).collect::<Vec<_>>();
+    let rendered = fields
+        .iter()
+        .filter(|field| !field_is_omitted(field))
+        .map(field_label)
+        .collect::<Vec<_>>();
     format!("{{{}}}", rendered.join(", "))
 }
 
 fn field_label(field: &Value) -> String {
     match (field.get("name").and_then(Value::as_str), field.get("type")) {
         (Some(name), Some(ty)) => format!("{name}: {}", type_label(ty)),
-        // Tuple struct and tuple variant fields are bare type expressions.
-        (None, _) => type_label(field),
+        (None, Some(ty)) => type_label(ty),
+        (None, None) => type_label(field),
         (Some(name), None) => name.to_owned(),
     }
 }
 
-fn enum_label(object: &Map<String, Value>) -> String {
-    let Some(variants) = object.get("variants").and_then(Value::as_array) else {
+fn enum_label(ty: &Value) -> String {
+    let Some(variants) = ty.get("variants").and_then(Value::as_array) else {
         return "enum".to_owned();
     };
     let rendered = variants
@@ -86,33 +134,40 @@ fn enum_label(object: &Map<String, Value>) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("?")
                 .to_owned();
-            let Some(fields) = variant.get("fields").and_then(Value::as_array) else {
-                return name;
-            };
-            let named = fields.iter().any(|field| field.get("name").is_some());
-            let inner = fields
-                .iter()
-                .map(field_label)
-                .collect::<Vec<_>>()
-                .join(", ");
-            if named {
-                format!("{name}{{{inner}}}")
-            } else {
-                format!("{name}({inner})")
+            match kind(variant) {
+                Some("enumTupleVariantTypeNode") => {
+                    let items = variant
+                        .get("tuple")
+                        .and_then(|tuple| tuple.get("items"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(type_label)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{name}({items})")
+                }
+                Some("enumStructVariantTypeNode") => format!(
+                    "{name}{}",
+                    variant.get("struct").map(struct_label).unwrap_or_default()
+                ),
+                _ => name,
             }
         })
         .collect::<Vec<_>>();
     rendered.join(" | ")
 }
 
-/// Lists the fields of a struct-like type as `{name, type}` pairs.
+/// Lists the caller-visible fields of a struct-like type as `{name, type}` pairs.
 ///
-/// Returns `None` when the type is not a struct with named fields.
+/// Fields encoded from an omitted default, such as discriminators, are left
+/// out. Returns `None` when the type is not a struct with named fields.
 pub fn field_summaries(ty: &Value) -> Option<Vec<Value>> {
     let fields = ty.get("fields")?.as_array()?;
     Some(
         fields
             .iter()
+            .filter(|field| !field_is_omitted(field))
             .map(|field| {
                 json!({
                     "name": field.get("name").cloned().unwrap_or(Value::Null),
@@ -123,7 +178,7 @@ pub fn field_summaries(ty: &Value) -> Option<Vec<Value>> {
     )
 }
 
-/// Builds a compact JSON overview of a schema's accounts, instructions, and types.
+/// Builds a compact JSON overview of a schema's accounts, instructions, types, and errors.
 ///
 /// Field documentation and discriminators are omitted; use
 /// [`definition_with_dependencies`] to read one definition in full.
@@ -144,12 +199,14 @@ pub fn schema_summary(schema: &ProgramSchema) -> Value {
         .map(|instruction| {
             json!({
                 "name": instruction.name,
-                "args": instruction.args.iter().map(|arg| json!({"name": arg.name, "type": type_label(&arg.ty)})).collect::<Vec<_>>(),
+                "args": instruction.args.iter().filter(|arg| !arg.omitted).map(|arg| json!({"name": arg.name, "type": type_label(&arg.ty)})).collect::<Vec<_>>(),
                 "accounts": instruction.accounts.iter().map(|account| {
                     let mut flags = Vec::new();
                     if account.signer { flags.push("signer"); }
                     if account.writable { flags.push("writable"); }
-                    if account.pda.is_some() { flags.push("pda"); }
+                    if account.optional { flags.push("optional"); }
+                    if account.is_pda() { flags.push("pda"); }
+                    else if account.default_value.is_some() { flags.push("default"); }
                     json!({"name": account.name, "flags": flags})
                 }).collect::<Vec<_>>(),
             })
@@ -160,12 +217,18 @@ pub fn schema_summary(schema: &ProgramSchema) -> Value {
         .iter()
         .map(|(name, ty)| (name.clone(), Value::String(type_label(ty))))
         .collect::<Map<_, _>>();
+    let errors = schema
+        .errors
+        .iter()
+        .map(|error| json!({"code": error.code, "name": error.name, "message": error.message}))
+        .collect::<Vec<_>>();
     json!({
         "name": schema.name,
         "address": schema.address,
         "accounts": accounts,
         "instructions": instructions,
         "types": types,
+        "errors": errors,
     })
 }
 
@@ -219,9 +282,8 @@ pub fn definition_with_dependencies(schema: &ProgramSchema, name: &str) -> Optio
 fn collect_defined_names(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(object) => {
-            if let Some(name) = object
-                .get("defined")
-                .and_then(|defined| defined.as_str().or_else(|| defined.get("name")?.as_str()))
+            if kind(value) == Some("definedTypeLinkNode")
+                && let Some(name) = object.get("name").and_then(Value::as_str)
             {
                 out.insert(name.to_owned());
             }
@@ -240,25 +302,35 @@ fn collect_defined_names(value: &Value, out: &mut BTreeSet<String>) {
 mod tests {
     use serde_json::json;
 
-    use super::{definition_with_dependencies, type_label};
+    use super::{definition_with_dependencies, schema_summary, type_label};
+    use crate::anchor::convert_type;
     use crate::parse_idl;
 
     #[test]
     fn renders_containers_defined_types_and_inline_enums() {
         assert_eq!(
-            type_label(&json!({"vec": {"option": "u64"}})),
+            type_label(&convert_type(&json!({"vec": {"option": "u64"}})).unwrap()),
             "Vec<Option<u64>>"
         );
-        assert_eq!(type_label(&json!({"array": ["u8", 32]})), "[u8; 32]");
         assert_eq!(
-            type_label(&json!({"defined": {"name": "Proposal"}})),
+            type_label(&convert_type(&json!({"array": ["u8", 32]})).unwrap()),
+            "[u8; 32]"
+        );
+        assert_eq!(
+            type_label(&convert_type(&json!({"defined": {"name": "Proposal"}})).unwrap()),
             "Proposal"
         );
         assert_eq!(
             type_label(
-                &json!({"kind": "enum", "variants": [{"name": "A"}, {"name": "B", "fields": ["u8"]}, {"name": "C", "fields": [{"name": "x", "type": "pubkey"}]}]})
+                &convert_type(&json!({"kind": "enum", "variants": [{"name": "A"}, {"name": "B", "fields": ["u8"]}, {"name": "C", "fields": [{"name": "x", "type": "pubkey"}]}]})).unwrap()
             ),
             "A | B(u8) | C{x: pubkey}"
+        );
+        assert_eq!(
+            type_label(
+                &json!({"kind": "fixedSizeTypeNode", "size": 32, "type": {"kind": "stringTypeNode", "encoding": "utf8"}})
+            ),
+            "string[32]"
         );
     }
 
@@ -280,5 +352,10 @@ mod tests {
         let types = found["types"].as_object().unwrap();
         assert!(types.contains_key("Status") && types.contains_key("Window"));
         assert!(!types.contains_key("Unused"));
+        let summary = schema_summary(&schema);
+        assert_eq!(
+            summary["accounts"][0]["fields"],
+            json!([{"name": "status", "type": "Status"}])
+        );
     }
 }

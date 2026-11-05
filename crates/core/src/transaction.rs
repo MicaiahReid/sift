@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sift_types::{InstructionSchema, ProgramSchema};
+use sift_types::{Discriminator, InstructionSchema, OptionalAccountStrategy, ProgramSchema};
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
@@ -16,6 +16,7 @@ use tracing::debug;
 
 use crate::codec::encode_type;
 use crate::idl::find_instruction;
+use crate::nodes::{kind, value_node_to_json};
 
 /// Transaction envelope selected by the caller.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -98,23 +99,7 @@ pub fn build_transaction(
     let payer = resolve_payer(definition, options)?;
     debug!(payer, "resolved transaction fee payer");
     let program_id = parse_address(&schema.address)?;
-    let metas = definition
-        .accounts
-        .iter()
-        .map(|account| {
-            let address = options
-                .accounts
-                .get(&account.name)
-                .or_else(|| options.accounts.get(&to_kebab(&account.name)))
-                .ok_or_else(|| anyhow::anyhow!("missing required account {}", account.name))?;
-            let address = parse_address(address)?;
-            Ok(if account.writable {
-                AccountMeta::new(address, account.signer)
-            } else {
-                AccountMeta::new_readonly(address, account.signer)
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let metas = resolve_account_metas(definition, &schema.address, options)?;
     let data = instruction_data(definition, &options.args, &schema.types)?;
     let instruction = Instruction {
         program_id,
@@ -187,20 +172,99 @@ fn resolve_payer(instruction: &InstructionSchema, options: &BuildOptions) -> Res
     }
 }
 
+/// Resolves each instruction account to an address, applying Codama defaults.
+///
+/// Caller-supplied addresses win. Otherwise a `publicKeyValueNode` default or
+/// a `programIdValueNode` default is used; optional accounts without a value
+/// follow the instruction's optional-account strategy; anything else is an error.
+fn resolve_account_metas(
+    instruction: &InstructionSchema,
+    program_address: &str,
+    options: &BuildOptions,
+) -> Result<Vec<AccountMeta>> {
+    let mut metas = Vec::new();
+    for account in &instruction.accounts {
+        let supplied = options
+            .accounts
+            .get(&account.name)
+            .or_else(|| options.accounts.get(&to_kebab(&account.name)));
+        let defaulted;
+        let address = match supplied {
+            Some(address) => address.as_str(),
+            None => match default_address(account.default_value.as_ref(), program_address) {
+                Some(address) => {
+                    defaulted = address;
+                    defaulted.as_str()
+                }
+                None if account.optional => match instruction.optional_account_strategy {
+                    OptionalAccountStrategy::Omitted => continue,
+                    OptionalAccountStrategy::ProgramId => {
+                        metas.push(AccountMeta::new_readonly(
+                            parse_address(program_address)?,
+                            false,
+                        ));
+                        continue;
+                    }
+                },
+                None => bail!("missing required account {}", account.name),
+            },
+        };
+        let address =
+            parse_address(address).with_context(|| format!("account {}", account.name))?;
+        metas.push(if account.writable {
+            AccountMeta::new(address, account.signer)
+        } else {
+            AccountMeta::new_readonly(address, account.signer)
+        });
+    }
+    Ok(metas)
+}
+
+fn default_address(default_value: Option<&Value>, program_address: &str) -> Option<String> {
+    let node = default_value?;
+    match kind(node)? {
+        "publicKeyValueNode" => node.get("publicKey")?.as_str().map(ToOwned::to_owned),
+        "programIdValueNode" => Some(program_address.to_owned()),
+        _ => None,
+    }
+}
+
+/// Encodes instruction data from caller arguments and Codama defaults.
+///
+/// Arguments the caller leaves out fall back to their default value node.
+/// Constant discriminators that no argument produces are inserted at their
+/// declared offset.
 fn instruction_data(
     instruction: &InstructionSchema,
     args: &BTreeMap<String, Value>,
     definitions: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
-    let mut data = instruction.discriminator.clone();
+    let mut data = Vec::new();
     for field in &instruction.args {
-        encode_type(
-            &field.ty,
-            args.get(&field.name)
-                .ok_or_else(|| anyhow::anyhow!("missing argument {}", field.name))?,
-            definitions,
-            &mut data,
-        )?;
+        let default;
+        let value = match (args.get(&field.name), &field.default_value) {
+            (Some(value), _) if !field.omitted => value,
+            (_, Some(node)) => {
+                default = value_node_to_json(node)?;
+                &default
+            }
+            (Some(value), None) => value,
+            (None, None) => bail!("missing argument {}", field.name),
+        };
+        encode_type(&field.ty, value, definitions, &mut data)
+            .with_context(|| format!("argument {}", field.name))?;
+    }
+    for discriminator in &instruction.discriminators {
+        let Discriminator::Constant { offset, bytes, .. } = discriminator else {
+            continue;
+        };
+        if data.get(*offset..offset + bytes.len()) == Some(bytes.as_slice()) {
+            continue;
+        }
+        if *offset > data.len() {
+            bail!("instruction discriminator offset {offset} is beyond the encoded arguments")
+        }
+        data.splice(offset..offset, bytes.iter().copied());
     }
     Ok(data)
 }

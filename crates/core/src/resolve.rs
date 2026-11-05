@@ -25,7 +25,7 @@ pub struct AutoResolvedSchema {
 /// 1. An explicit IDL path, when given, is used and never registered.
 /// 2. Registered sources, in the program's priority order.
 /// 3. The canonical on-chain Program Metadata IDL, which is registered and saved.
-/// 4. A single local Anchor IDL found from `workdir`, used without registering it.
+/// 4. A single local Anchor or Codama IDL found from `workdir`, used without registering it.
 ///
 /// Returns the registry error when nothing can be discovered, with the
 /// discovery attempts described in its context.
@@ -100,12 +100,12 @@ pub async fn resolve_schema_auto(
                     .join(", ");
                 warn!(address, paths, "ambiguous local IDL candidates");
                 return Err(initial_error.context(format!(
-                    "multiple local Anchor IDLs match; register one explicitly: {paths}"
+                    "multiple local IDLs match; register one explicitly: {paths}"
                 )));
             }
         }
     }
     Err(initial_error.context(format!(
-        "no canonical on-chain IDL exists for {address} and no local Anchor IDL was found; register one with a file or URL"
+        "no canonical on-chain IDL exists for {address} and no local Anchor or Codama IDL was found; register one with a file or URL"
     )))
 }

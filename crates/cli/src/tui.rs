@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Map, Value, json};
-use sift_core::Registry;
+use sift_core::{Registry, nodes, summary::type_label};
 use sift_types::{IdlSource, ProgramSchema};
 use std::{
     collections::BTreeMap,
@@ -920,31 +920,30 @@ impl App {
 }
 
 fn account_children(value: &Value, ty: &Value, defs: &BTreeMap<String, Value>) -> Vec<Node> {
-    let ty = resolve_type(ty, defs);
-    if ty.get("kind").and_then(Value::as_str) == Some("struct") {
-        return ty
-            .get("fields")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+    let shaped = nodes::shape(ty, defs);
+    if let Some(fields) = nodes::struct_fields(shaped) {
+        return fields
+            .iter()
+            .filter(|field| !nodes::field_is_omitted(field))
             .filter_map(|field| {
                 let name = field.get("name").and_then(Value::as_str)?;
-                let field_ty = field.get("type").cloned().unwrap_or_else(|| field.clone());
+                let field_ty = field.get("type")?;
                 Some(account_node(
                     name,
                     value.get(name).unwrap_or(&Value::Null),
-                    &field_ty,
+                    field_ty,
                     defs,
                 ))
             })
             .collect();
     }
-    if let Some(values) = value.as_array() {
-        let element = array_element(ty).unwrap_or_else(|| Value::String("unknown".into()));
+    if let Some(values) = value.as_array()
+        && let Some(element) = nodes::sequence_item(shaped)
+    {
         return values
             .iter()
             .enumerate()
-            .map(|(index, value)| account_node(&format!("[{index}]"), value, &element, defs))
+            .map(|(index, value)| account_node(&format!("[{index}]"), value, element, defs))
             .collect();
     }
     generic_children(value)
@@ -958,7 +957,7 @@ fn account_node(label: &str, value: &Value, ty: &Value, defs: &BTreeMap<String, 
     };
     Node {
         label: label.into(),
-        ty: type_label(ty, defs),
+        ty: type_label(ty),
         preview: typed_preview(value, ty, defs),
         raw: value.clone(),
         children,
@@ -1013,39 +1012,8 @@ fn warning_node(label: &str, note: &str) -> Node {
         warning: true,
     }
 }
-fn resolve_type<'a>(mut ty: &'a Value, defs: &'a BTreeMap<String, Value>) -> &'a Value {
-    for _ in 0..16 {
-        let name = match ty {
-            Value::String(name) if defs.contains_key(name) => Some(name.as_str()),
-            Value::Object(object) => object.get("defined").and_then(Value::as_str).or_else(|| {
-                object
-                    .get("defined")
-                    .and_then(|v| v.get("name"))
-                    .and_then(Value::as_str)
-            }),
-            _ => None,
-        };
-        match name.and_then(|name| defs.get(name)) {
-            Some(next) => ty = next,
-            None => return ty,
-        }
-    }
-    ty
-}
-fn array_element(ty: &Value) -> Option<Value> {
-    ty.as_object()?.get("vec").cloned().or_else(|| {
-        ty.get("array")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .cloned()
-    })
-}
 fn byte_array(value: &Value, ty: &Value, defs: &BTreeMap<String, Value>) -> Option<Vec<u8>> {
-    let ty = resolve_type(ty, defs);
-    let byte_type = ty.as_str() == Some("bytes")
-        || array_element(ty)
-            .is_some_and(|element| resolve_type(&element, defs).as_str() == Some("u8"));
-    byte_type.then_some(())?;
+    nodes::is_byte_sequence(ty, defs).then_some(())?;
     value
         .as_array()?
         .iter()
@@ -1056,26 +1024,6 @@ fn byte_array(value: &Value, ty: &Value, defs: &BTreeMap<String, Value>) -> Opti
                 .map(|value| value as u8)
         })
         .collect()
-}
-fn type_label(ty: &Value, defs: &BTreeMap<String, Value>) -> String {
-    if let Some(name) = ty.get("defined").and_then(Value::as_str).or_else(|| {
-        ty.get("defined")
-            .and_then(|v| v.get("name"))
-            .and_then(Value::as_str)
-    }) {
-        return name.into();
-    }
-    let ty = resolve_type(ty, defs);
-    if let Some(name) = ty.as_str() {
-        return name.into();
-    }
-    if let Some(inner) = ty.get("vec") {
-        return format!("Vec<{}>", type_label(inner, defs));
-    }
-    if ty.get("kind").and_then(Value::as_str) == Some("struct") {
-        return "struct".into();
-    }
-    serde_json::to_string(ty).unwrap_or_else(|_| "unknown".into())
 }
 fn typed_preview(value: &Value, ty: &Value, defs: &BTreeMap<String, Value>) -> String {
     if let Some(bytes) = byte_array(value, ty, defs) {
@@ -1152,7 +1100,10 @@ mod tests {
     }
 
     fn account_type() -> Value {
-        json!({"kind":"struct","fields":[{"name":"bytes","type":{"vec":"u8"}},{"name":"count","type":"u64"}]})
+        sift_core::anchor::convert_type(
+            &json!({"kind":"struct","fields":[{"name":"bytes","type":{"vec":"u8"}},{"name":"count","type":"u64"}]}),
+        )
+        .unwrap()
     }
 
     fn metadata() -> RequestMetadata {
@@ -1218,7 +1169,7 @@ mod tests {
         let schema = sift_core::parse_idl(
             &json!({
                 "name": "example",
-                "accounts": [{"name":"State", "type":account_type()}],
+                "accounts": [{"name":"State", "type":{"kind":"struct","fields":[{"name":"count","type":"u64"}]}}],
                 "instructions": [{"name":"ping", "accounts":[], "args":[]}],
                 "types": [{"name":"Counter", "type":{"kind":"struct", "fields":[]}}]
             })
