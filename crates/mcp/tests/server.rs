@@ -292,6 +292,61 @@ async fn agents_can_register_an_idl_and_query_filtered_accounts() {
 }
 
 #[tokio::test]
+async fn broken_idls_are_rejected_and_external_registry_edits_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    let idl_path = dir.path().join("demo.json");
+    std::fs::write(&idl_path, idl_json().to_string()).unwrap();
+    let registry_path = dir.path().join("registry.toml");
+    let rpc_url = fake_rpc().await;
+    let client = start(&registry_path, rpc_url).await;
+    call(
+        &client,
+        "idl_add",
+        json!({"program": PROGRAM, "file": idl_path, "alias": "demo"}),
+    )
+    .await;
+
+    // A working source must not mask a broken one during validation.
+    let broken = dir.path().join("broken.json");
+    std::fs::write(&broken, r#"{"not_an_idl": true}"#).unwrap();
+    let (failed, response) = call(
+        &client,
+        "idl_add",
+        json!({"program": PROGRAM, "file": broken}),
+    )
+    .await;
+    assert!(failed, "{response}");
+    let (_, listed) = call(&client, "idl_list", json!({})).await;
+    assert_eq!(
+        listed["programs"][0]["sources"].as_array().unwrap().len(),
+        1
+    );
+
+    // Another process (the CLI) registers a program between server calls.
+    let other = address(4);
+    let mut external = Registry::load(Some(registry_path.clone())).await.unwrap();
+    let source = sift_types::IdlSource::File {
+        name: "demo.json".into(),
+        path: idl_path.clone(),
+    };
+    external
+        .add_source(&other, source, Some("other".into()))
+        .unwrap();
+    external.save().await.unwrap();
+    let (failed, _) = call(
+        &client,
+        "idl_alias",
+        json!({"program": "demo", "alias": "demo2"}),
+    )
+    .await;
+    assert!(!failed);
+    let (_, listed) = call(&client, "idl_list", json!({})).await;
+    assert_eq!(listed["programs"].as_array().unwrap().len(), 2);
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn input_mistakes_are_reported_as_tool_errors_with_guidance() {
     let dir = tempfile::tempdir().unwrap();
     let registry_path = dir.path().join("registry.toml");

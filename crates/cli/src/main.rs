@@ -83,9 +83,11 @@ fn init_logging(verbose: u8) {
         _ => "sift=trace,sift_core=trace,warn",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
+    // Stdout carries JSON, encoded bytes, and the MCP protocol; diagnostics must not mix in.
     fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
 }

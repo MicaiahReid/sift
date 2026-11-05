@@ -22,7 +22,7 @@ use rmcp::{
 use serde_json::{Value, json};
 use sift_core::{AutoResolvedSchema, DecodedAccounts, Registry, RpcClient, resolve_schema_auto};
 use sift_types::IdlSource;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::debug;
 
 mod account;
@@ -75,8 +75,11 @@ pub struct ServerOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
     rpc_url: String,
+    commitment: String,
     program: String,
     account_type: String,
+    /// Serialized layout and type definitions, so a changed IDL never serves stale decodes.
+    layout: String,
 }
 
 struct CachedAccounts {
@@ -267,8 +270,17 @@ impl SiftServer {
 }
 
 impl SiftServer {
-    pub(crate) fn registry(&self) -> &Mutex<Registry> {
-        &self.registry
+    /// Locks the registry after refreshing it from disk.
+    ///
+    /// The CLI may edit the same file while the server runs, so every tool
+    /// works from the current on-disk state rather than the startup snapshot.
+    pub(crate) async fn registry(&self) -> Result<MutexGuard<'_, Registry>> {
+        let mut guard = self.registry.lock().await;
+        let path = guard.path.clone();
+        *guard = Registry::load(Some(path))
+            .await
+            .context("reloading the IDL registry")?;
+        Ok(guard)
     }
 
     pub(crate) fn options(&self) -> &ServerOptions {
@@ -286,7 +298,7 @@ impl SiftServer {
 
     /// Resolves a schema, registering the canonical on-chain IDL when nothing is registered.
     pub(crate) async fn schema(&self, program: &str, rpc: &RpcClient) -> Result<ResolvedSchema> {
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.registry().await?;
         let resolved = resolve_schema_auto(
             &mut registry,
             program,
@@ -309,8 +321,10 @@ impl SiftServer {
     ) -> Result<(DecodedAccounts, Duration)> {
         let key = CacheKey {
             rpc_url: rpc.url.clone(),
+            commitment: rpc.commitment.clone(),
             program: schema.address.clone(),
             account_type: layout.name.clone(),
+            layout: serde_json::to_string(&(layout, &schema.types))?,
         };
         if !refresh {
             let cache = self.cache.lock().await;
@@ -374,7 +388,10 @@ impl ServerHandler for SiftServer {
                 Some(json!({"available": [REGISTRY_RESOURCE_URI]})),
             ));
         }
-        let registry = self.registry.lock().await;
+        let registry = self
+            .registry()
+            .await
+            .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
         let text = serde_json::to_string(&registry.json()).unwrap_or_default();
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(text, request.uri).with_mime_type("application/json"),

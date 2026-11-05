@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sift_core::{
-    discover_canonical_idl,
+    Registry, discover_canonical_idl,
     summary::{definition_with_dependencies, schema_summary},
 };
 use sift_types::IdlSource;
@@ -89,7 +89,7 @@ pub struct IdlShowParams {
 }
 
 pub(super) async fn list(server: &SiftServer) -> Result<Value> {
-    let registry = server.registry().lock().await;
+    let registry = server.registry().await?;
     let programs = registry
         .config
         .programs
@@ -168,10 +168,13 @@ pub(super) async fn add(server: &SiftServer, params: IdlAddParams) -> Result<Val
         (None, None, false) => bail!("provide exactly one of `file`, `url`, or `onchain: true`"),
         _ => bail!("`file`, `url`, and `onchain` are mutually exclusive; provide only one"),
     };
-    let mut registry = server.registry().lock().await;
-    // Validate against a copy so a broken IDL never reaches the saved registry.
-    let mut trial = registry.clone();
-    trial.add_source(&params.program, source.clone(), params.alias.clone())?;
+    let mut registry = server.registry().await?;
+    // Validate the new source alone so an existing working source cannot mask a broken one.
+    let mut trial = Registry {
+        path: registry.path.clone(),
+        config: Default::default(),
+    };
+    trial.add_source(&params.program, source.clone(), None)?;
     let loaded = trial
         .load_schema_with_source(&params.program, None, &rpc)
         .await
@@ -197,7 +200,7 @@ pub(super) async fn add(server: &SiftServer, params: IdlAddParams) -> Result<Val
 }
 
 pub(super) async fn alias(server: &SiftServer, params: IdlAliasParams) -> Result<Value> {
-    let mut registry = server.registry().lock().await;
+    let mut registry = server.registry().await?;
     registry.add_alias(&params.program, &params.alias)?;
     registry.save().await?;
     let address = registry.program_address(&params.program)?;
@@ -211,7 +214,7 @@ pub(super) async fn alias(server: &SiftServer, params: IdlAliasParams) -> Result
 }
 
 pub(super) async fn prefer(server: &SiftServer, params: IdlPreferParams) -> Result<Value> {
-    let mut registry = server.registry().lock().await;
+    let mut registry = server.registry().await?;
     let address = registry.program_address(&params.program)?;
     if let Err(error) = registry.prefer_source(&address, &params.source_id) {
         let known = registry
@@ -235,7 +238,7 @@ pub(super) async fn prefer(server: &SiftServer, params: IdlPreferParams) -> Resu
 }
 
 pub(super) async fn remove(server: &SiftServer, params: IdlRemoveParams) -> Result<Value> {
-    let mut registry = server.registry().lock().await;
+    let mut registry = server.registry().await?;
     let address = registry.program_address(&params.program)?;
     let Some(entry) = registry.config.programs.remove(&address) else {
         bail!("program {} is not registered", params.program)

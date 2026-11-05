@@ -21,6 +21,7 @@ sift-types = { path = "../types" }
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client"] }
 tempfile = "3"
+sift-types = { path = "../types" }
 tokio = { workspace = true, features = ["net", "io-util"] }
 
 [lints]

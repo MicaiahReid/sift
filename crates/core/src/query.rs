@@ -106,7 +106,7 @@ fn condition_holds(value: &Value, condition: &Condition) -> Result<bool> {
             };
             options
                 .iter()
-                .any(|option| compare(field, option) == Some(Ordering::Equal))
+                .any(|option| compare(enum_kind(field, option), option) == Some(Ordering::Equal))
         }
         Operator::Exists => unreachable!("handled above"),
     })
@@ -124,8 +124,11 @@ fn enum_kind<'a>(field: &'a Value, operand: &Value) -> &'a Value {
 }
 
 /// Orders two JSON values, treating numeric strings as numbers.
+///
+/// Integers compare exactly at any width the codec emits; only mixed
+/// integer/float comparisons fall back to floating point.
 pub fn compare(left: &Value, right: &Value) -> Option<Ordering> {
-    if let (Some(left), Some(right)) = (as_number(left), as_number(right)) {
+    if let (Some(left), Some(right)) = (Number::parse(left), Number::parse(right)) {
         return left.partial_cmp(&right);
     }
     match (left, right) {
@@ -222,10 +225,20 @@ impl Number {
         }
     }
 
+    /// Adds exactly while the sum fits in 128 bits, then degrades to floating point.
     fn add(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Int(left), Self::Int(right)) => Self::Int(left + right),
+            (Self::Int(left), Self::Int(right)) => left
+                .checked_add(right)
+                .map_or_else(|| Self::Float(left as f64 + right as f64), Self::Int),
             (left, right) => Self::Float(left.as_f64() + right.as_f64()),
+        }
+    }
+
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Int(left), Self::Int(right)) => Some(left.cmp(right)),
+            (left, right) => left.as_f64().partial_cmp(&right.as_f64()),
         }
     }
 
@@ -281,6 +294,9 @@ pub fn aggregate<'a>(
                 continue;
             }
             state.present += 1;
+            if spec.op == AggregateOp::Count {
+                continue;
+            }
             let Some(number) = Number::parse(field) else {
                 continue;
             };
@@ -289,14 +305,14 @@ pub fn aggregate<'a>(
             if state
                 .min
                 .as_ref()
-                .is_none_or(|(current, _)| number.as_f64() < current.as_f64())
+                .is_none_or(|(current, _)| number.partial_cmp(current) == Some(Ordering::Less))
             {
                 state.min = Some((number, key.to_owned()));
             }
             if state
                 .max
                 .as_ref()
-                .is_none_or(|(current, _)| number.as_f64() > current.as_f64())
+                .is_none_or(|(current, _)| number.partial_cmp(current) == Some(Ordering::Greater))
             {
                 state.max = Some((number, key.to_owned()));
             }
@@ -414,6 +430,17 @@ mod tests {
         assert!(
             matches(
                 &account,
+                &[condition(
+                    "status",
+                    Operator::In,
+                    json!(["Draft", "Active"])
+                )]
+            )
+            .unwrap()
+        );
+        assert!(
+            matches(
+                &account,
                 &[condition("author", Operator::Contains, json!("1111"))]
             )
             .unwrap()
@@ -458,6 +485,54 @@ mod tests {
                 json!({})
             ]
         );
+    }
+
+    #[test]
+    fn wide_integers_compare_exactly_and_sums_survive_overflow() {
+        let small = json!({"n": "9007199254740992"});
+        let large = json!({"n": "9007199254740993"});
+        assert!(
+            !matches(
+                &large,
+                &[condition("n", Operator::Eq, json!("9007199254740992"))]
+            )
+            .unwrap()
+        );
+        assert!(
+            matches(
+                &large,
+                &[condition("n", Operator::Gt, json!("9007199254740992"))]
+            )
+            .unwrap()
+        );
+        let items = [("a", &small), ("b", &large)];
+        let result = aggregate(
+            items,
+            &[Aggregate {
+                op: AggregateOp::Max,
+                path: "n".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(result["max(n)"]["key"], "b");
+        let huge = json!({"n": i128::MAX.to_string()});
+        let items = [("a", &huge), ("b", &large)];
+        let result = aggregate(
+            items,
+            &[
+                Aggregate {
+                    op: AggregateOp::Sum,
+                    path: "n".into(),
+                },
+                Aggregate {
+                    op: AggregateOp::Count,
+                    path: "n".into(),
+                },
+            ],
+        )
+        .unwrap();
+        assert!(result["sum(n)"].is_f64());
+        assert_eq!(result["count(n)"], 2);
     }
 
     #[test]
