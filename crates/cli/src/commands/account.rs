@@ -3,6 +3,9 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use sift_types::{AccountSchema, ProgramSchema};
+use tokio::sync::mpsc;
+
 use sift_core::{
     Registry, RpcClient, decode_account_with_info, encode_account, find_account, patch_value,
 };
@@ -10,7 +13,10 @@ use tracing::debug;
 
 use crate::{
     ContextOptions,
-    tui::{DecodedAccount, RequestMetadata, account_document, account_list_json, run, should_run},
+    tui::{
+        AccountPageUpdate, AccountPaging, DecodedAccount, RequestMetadata, account_document,
+        account_list_json, run_paged_accounts, should_run,
+    },
     utils::{
         BytesFormat, parse_assignment, print_bytes, read_value_json, resolve_schema,
         resolve_schema_with_source,
@@ -84,52 +90,15 @@ impl AccountCommand {
                     commitment: rpc.commitment.clone(),
                 };
                 let filters = json!([{ "memcmp": { "offset": 0, "bytes": bs58::encode(&layout.discriminator).into_string() }}]);
+                if should_run(no_tui, true) {
+                    return browse_accounts(rpc, schema, account_type, metadata, filters).await;
+                }
                 let accounts = rpc.program_accounts(&schema.address, filters).await?;
-                let mut result = Vec::new();
-                for (address, bytes) in accounts {
-                    match decode_account_with_info(layout, &schema.types, &bytes) {
-                        Ok((data, decode_info)) => {
-                            let note = decode_info.has_unmodelled_data().then(|| {
-                                format!(
-                                    "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
-                                    decode_info.trailing_byte_count,
-                                    decode_info.non_zero_trailing_byte_count,
-                                )
-                            });
-                            result.push(DecodedAccount {
-                                address,
-                                account_type: layout.name.clone(),
-                                data,
-                                seeds: None,
-                                note,
-                            });
-                        }
-                        Err(e) => {
-                            debug!(account = %layout.name, byte_length = bytes.len(), error = %e, "failed to decode account data");
-                        }
-                    }
-                }
-                debug!(account_type = %layout.name, matched_count = result.len(), "decoded matching program accounts");
-                let use_tui = should_run(no_tui, !result.is_empty());
-                debug!(
-                    no_tui,
-                    has_accounts = !result.is_empty(),
-                    use_tui,
-                    "selected account-list presentation"
+                let result = decode_accounts(accounts, layout, &schema);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&account_list_json(&result))?
                 );
-                if use_tui {
-                    run(account_document(
-                        &result,
-                        &layout.ty,
-                        &schema.types,
-                        metadata,
-                    ))?;
-                } else {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&account_list_json(&result))?
-                    );
-                }
             }
             AccountSubcommand::Patch {
                 address,
@@ -180,4 +149,117 @@ impl AccountCommand {
         }
         Ok(())
     }
+}
+
+fn decode_accounts(
+    accounts: impl IntoIterator<Item = (String, Vec<u8>)>,
+    layout: &AccountSchema,
+    schema: &ProgramSchema,
+) -> Vec<DecodedAccount> {
+    accounts.into_iter().filter_map(|(address, bytes)| {
+        match decode_account_with_info(layout, &schema.types, &bytes) {
+            Ok((data, info)) => Some(DecodedAccount {
+                address,
+                account_type: layout.name.clone(),
+                data,
+                seeds: None,
+                note: info.has_unmodelled_data().then(|| format!(
+                    "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
+                    info.trailing_byte_count, info.non_zero_trailing_byte_count,
+                )),
+            }),
+            Err(error) => {
+                debug!(account = %layout.name, byte_length = bytes.len(), error = %error, "failed to decode account data");
+                None
+            }
+        }
+    }).collect()
+}
+
+async fn browse_accounts(
+    rpc: RpcClient,
+    schema: ProgramSchema,
+    account_type: String,
+    metadata: RequestMetadata,
+    filters: Value,
+) -> Result<()> {
+    let layout = find_account(&schema, &account_type)?.clone();
+    let initial = account_document(&[], &layout.ty, &schema.types, metadata.clone());
+    let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+    let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+    requests_tx.send(())?;
+    let worker = tokio::spawn(async move {
+        let mut addresses = None;
+        let mut offset = 0;
+        while requests_rx.recv().await.is_some() {
+            if addresses.is_none() {
+                match rpc
+                    .program_account_addresses(&schema.address, filters.clone())
+                    .await
+                {
+                    Ok(discovered) => {
+                        if updates_tx
+                            .send(AccountPageUpdate::Discovered {
+                                addresses: discovered.clone(),
+                                account_type: layout.name.clone(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        addresses = Some(discovered);
+                    }
+                    Err(error) => {
+                        if updates_tx
+                            .send(AccountPageUpdate::Failed(format!("{error:#}")))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            let page: Result<AccountPageUpdate> = async {
+                let addresses = addresses.as_ref().expect("addresses were loaded");
+                let end = (offset + 100).min(addresses.len());
+                let keys = &addresses[offset..end];
+                let accounts = rpc.multiple_accounts(keys).await?;
+                // Accounts may close or change owner between discovery and the page request.
+                let accounts =
+                    keys.iter()
+                        .cloned()
+                        .zip(accounts)
+                        .filter_map(|(address, account)| {
+                            account
+                                .filter(|account| account.owner == schema.address)
+                                .map(|account| (address, account.data))
+                        });
+                let decoded = decode_accounts(accounts, &layout, &schema);
+                let start = offset;
+                offset = end;
+                Ok(AccountPageUpdate::Loaded {
+                    start,
+                    document: account_document(
+                        &decoded,
+                        &layout.ty,
+                        &schema.types,
+                        metadata.clone(),
+                    ),
+                    scanned: offset,
+                    total: addresses.len(),
+                })
+            }
+            .await;
+            let update =
+                page.unwrap_or_else(|error| AccountPageUpdate::Failed(format!("{error:#}")));
+            if updates_tx.send(update).is_err() {
+                break;
+            }
+        }
+    });
+    let result = run_paged_accounts(initial, AccountPaging::new(updates_rx, requests_tx));
+    worker.abort();
+    let _ = worker.await;
+    result
 }

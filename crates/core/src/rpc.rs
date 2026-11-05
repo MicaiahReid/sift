@@ -41,7 +41,7 @@ impl RpcClient {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         debug!(endpoint = %self.url, method, payload = ?params, "sending RPC request");
-        let response: Value = self
+        let mut response: Value = self
             .client
             .post(&self.url)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
@@ -56,8 +56,8 @@ impl RpcClient {
             bail!("RPC {method} failed: {error}")
         }
         response
-            .get("result")
-            .cloned()
+            .get_mut("result")
+            .map(Value::take)
             .ok_or_else(|| anyhow::anyhow!("RPC {method} response lacks result"))
     }
 
@@ -84,6 +84,76 @@ impl RpcClient {
     /// Gets one account's base64 bytes, or `None` when it does not exist.
     pub async fn account_data(&self, address: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.account(address).await?.map(|account| account.data))
+    }
+
+    /// Lists matching program account addresses without downloading account data.
+    pub async fn program_account_addresses(
+        &self,
+        program: &str,
+        filters: Value,
+    ) -> Result<Vec<String>> {
+        let result = self
+            .call(
+                "getProgramAccounts",
+                json!([program, {
+                    "encoding": "base64", "commitment": self.commitment, "filters": filters,
+                    "dataSlice": {"offset": 0, "length": 0}
+                }]),
+            )
+            .await?;
+        result
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("getProgramAccounts result is not an array"))?
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("pubkey")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("program account lacks pubkey"))
+            })
+            .collect()
+    }
+
+    /// Fetches up to 100 accounts in address order, retaining missing accounts as `None`.
+    pub async fn multiple_accounts(&self, addresses: &[String]) -> Result<Vec<Option<RpcAccount>>> {
+        if addresses.len() > 100 {
+            bail!("getMultipleAccounts accepts at most 100 addresses")
+        }
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = self
+            .call(
+                "getMultipleAccounts",
+                json!([addresses, {
+                    "encoding": "base64", "commitment": self.commitment
+                }]),
+            )
+            .await?;
+        let values = result
+            .get("value")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("getMultipleAccounts response lacks accounts"))?;
+        if values.len() != addresses.len() {
+            bail!("getMultipleAccounts returned an unexpected number of accounts")
+        }
+        values
+            .iter()
+            .map(|value| {
+                if value.is_null() {
+                    return Ok(None);
+                }
+                let owner = value
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("account has no owner"))?
+                    .to_owned();
+                let data =
+                    decode_data(value)?.ok_or_else(|| anyhow::anyhow!("account has no data"))?;
+                Ok(Some(RpcAccount { owner, data }))
+            })
+            .collect()
     }
 
     /// Gets all program-owned accounts as `(address, bytes)` pairs.
@@ -173,7 +243,82 @@ fn decode_data(value: &Value) -> Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_url_shorthand;
+    use super::{RpcClient, expand_url_shorthand};
+    use serde_json::{Value, json};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+
+    #[tokio::test]
+    async fn discovers_addresses_without_data_and_preserves_missing_account_positions() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (method, result) in [
+                (
+                    "getProgramAccounts",
+                    json!([{"pubkey":"first"},{"pubkey":"closed"}]),
+                ),
+                (
+                    "getMultipleAccounts",
+                    json!({"value":[{"owner":"program","data":["AQI=","base64"]}, null]}),
+                ),
+            ] {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let body = loop {
+                    let read = connection.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break serde_json::from_slice::<Value>(
+                                &request[end + 4..end + 4 + length],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(body["method"], method);
+                assert_eq!(body["params"][1]["commitment"], "confirmed");
+                if method == "getProgramAccounts" {
+                    assert_eq!(
+                        body["params"][1]["dataSlice"],
+                        json!({"offset":0,"length":0})
+                    );
+                    assert_eq!(body["params"][1]["filters"], json!([{"dataSize":42}]));
+                } else {
+                    assert_eq!(body["params"][0], json!(["first", "closed"]));
+                }
+                let response = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
+                write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let rpc = RpcClient::new(Some(endpoint), "confirmed".into()).unwrap();
+        let addresses = rpc
+            .program_account_addresses("program", json!([{"dataSize":42}]))
+            .await
+            .unwrap();
+        let accounts = rpc.multiple_accounts(&addresses).await.unwrap();
+        assert_eq!(accounts[0].as_ref().unwrap().data, vec![1, 2]);
+        assert!(accounts[1].is_none());
+        server.join().unwrap();
+    }
 
     #[test]
     fn expands_cluster_url_shorthands() {

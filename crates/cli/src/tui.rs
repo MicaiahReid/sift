@@ -18,6 +18,52 @@ use std::{
     io::IsTerminal,
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+pub(crate) enum AccountPageUpdate {
+    Discovered {
+        addresses: Vec<String>,
+        account_type: String,
+    },
+    Loaded {
+        document: BrowserDocument,
+        start: usize,
+        scanned: usize,
+        total: usize,
+    },
+    Failed(String),
+}
+
+pub(crate) struct AccountPaging {
+    updates: UnboundedReceiver<AccountPageUpdate>,
+    requests: UnboundedSender<()>,
+    loading: bool,
+    has_more: bool,
+    message: String,
+    loaded: usize,
+    scanned: usize,
+    retry_required: bool,
+    request_after_draw: bool,
+}
+
+impl AccountPaging {
+    pub(crate) fn new(
+        updates: UnboundedReceiver<AccountPageUpdate>,
+        requests: UnboundedSender<()>,
+    ) -> Self {
+        Self {
+            updates,
+            requests,
+            loading: true,
+            has_more: true,
+            message: "Finding matching accounts…".into(),
+            loaded: 0,
+            scanned: 0,
+            retry_required: false,
+            request_after_draw: false,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DecodedAccount {
@@ -370,8 +416,18 @@ fn count_label(count: usize, noun: &str) -> String {
 }
 
 pub(crate) fn run(document: BrowserDocument) -> Result<()> {
+    run_browser(document, None)
+}
+
+pub(crate) fn run_paged_accounts(document: BrowserDocument, paging: AccountPaging) -> Result<()> {
+    run_browser(document, Some(paging))
+}
+
+fn run_browser(document: BrowserDocument, paging: Option<AccountPaging>) -> Result<()> {
     let mut terminal = ratatui::try_init().context("cannot initialize the interactive browser")?;
-    let result = App::new(document).run(&mut terminal);
+    let mut app = App::new(document);
+    app.paging = paging;
+    let result = app.run(&mut terminal);
     let restore =
         ratatui::try_restore().context("cannot restore the terminal after the interactive browser");
     restore?;
@@ -390,6 +446,27 @@ struct View {
     nodes: Vec<Node>,
     presentation: Presentation,
 }
+
+fn view_json(view: &View, paged_accounts: bool) -> Value {
+    if paged_accounts {
+        let accounts = view.raw.as_array().expect("account list is an array");
+        Value::Array(
+            view.nodes
+                .iter()
+                .zip(accounts)
+                .map(|(node, raw)| {
+                    if raw.is_null() {
+                        json!({"address": node.label, "type": node.ty, "status": "pending"})
+                    } else {
+                        raw.clone()
+                    }
+                })
+                .collect(),
+        )
+    } else {
+        view.raw.clone()
+    }
+}
 #[derive(Debug)]
 struct Raw {
     text: String,
@@ -402,6 +479,7 @@ struct App {
     selected: usize,
     raw: Option<Raw>,
     status: Option<(String, Instant)>,
+    paging: Option<AccountPaging>,
 }
 impl App {
     fn new(document: BrowserDocument) -> Self {
@@ -417,10 +495,15 @@ impl App {
             selected: 0,
             raw: None,
             status: None,
+            paging: None,
         }
     }
     fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         loop {
+            if self.poll_account_pages() {
+                // RPC diagnostics can write to stderr while a request is pending.
+                terminal.clear()?;
+            }
             if self
                 .status
                 .as_ref()
@@ -429,6 +512,7 @@ impl App {
                 self.status = None;
             }
             terminal.draw(|frame| self.render(frame))?;
+            self.request_account_page();
             if event::poll(Duration::from_millis(250))?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
@@ -438,9 +522,138 @@ impl App {
             }
         }
     }
+    fn poll_account_pages(&mut self) -> bool {
+        let Some(paging) = &mut self.paging else {
+            return false;
+        };
+        let mut redraw = false;
+        while let Ok(update) = paging.updates.try_recv() {
+            let root = self
+                .history
+                .first_mut()
+                .map(|(view, _)| view)
+                .unwrap_or(&mut self.view);
+            match update {
+                AccountPageUpdate::Discovered {
+                    addresses,
+                    account_type,
+                } => {
+                    // Pending JSON is materialized only when requested, even for large address lists.
+                    root.raw = Value::Array(vec![Value::Null; addresses.len()]);
+                    root.nodes = addresses
+                        .into_iter()
+                        .map(|address| Node {
+                            label: address,
+                            ty: account_type.clone(),
+                            preview: String::new(),
+                            raw: Value::Null,
+                            children: vec![],
+                            bytes: None,
+                            openable: false,
+                            warning: false,
+                        })
+                        .collect();
+                    paging.request_after_draw = true;
+                    paging.message = format!(
+                        "{} addresses found · Loading account details…",
+                        root.nodes.len()
+                    );
+                }
+                AccountPageUpdate::Loaded {
+                    document,
+                    start,
+                    scanned,
+                    total,
+                } => {
+                    paging.loaded += document.nodes.len();
+                    let mut decoded = document
+                        .nodes
+                        .into_iter()
+                        .zip(
+                            document
+                                .raw
+                                .as_array()
+                                .expect("account list is an array")
+                                .iter()
+                                .cloned(),
+                        )
+                        .map(|(node, raw)| (node.label.clone(), (node, raw)))
+                        .collect::<BTreeMap<_, _>>();
+                    let raw = root.raw.as_array_mut().expect("account list is an array");
+                    for (node, raw) in root.nodes[start..scanned]
+                        .iter_mut()
+                        .zip(&mut raw[start..scanned])
+                    {
+                        if let Some((loaded_node, loaded_raw)) = decoded.remove(&node.label) {
+                            *node = loaded_node;
+                            *raw = loaded_raw;
+                        } else {
+                            *raw = json!({"address": node.label, "type": node.ty, "status": "unavailable"});
+                            node.raw = raw.clone();
+                            node.preview = "Account unavailable or could not decode".into();
+                            node.warning = true;
+                            node.openable = true;
+                        }
+                    }
+                    paging.has_more = scanned < total;
+                    paging.scanned = scanned;
+                    paging.loading = false;
+                    paging.retry_required = false;
+                    paging.request_after_draw = false;
+                    paging.message = format!(
+                        "{} loaded · {scanned}/{total} checked · {}",
+                        paging.loaded,
+                        if paging.has_more {
+                            "n next 100 · scroll near the end to load more"
+                        } else {
+                            "complete"
+                        }
+                    );
+                }
+                AccountPageUpdate::Failed(error) => {
+                    redraw = true;
+                    paging.loading = false;
+                    paging.retry_required = true;
+                    paging.message = format!("Could not load accounts: {error} · n retry");
+                    paging.has_more = true;
+                }
+            }
+            if self.history.is_empty()
+                && let Some(raw) = &mut self.raw
+            {
+                raw.text = raw_text(&view_json(&self.view, true));
+            }
+        }
+        redraw
+    }
+
+    fn request_account_page(&mut self) {
+        if let Some(paging) = &mut self.paging
+            && std::mem::take(&mut paging.request_after_draw)
+        {
+            let _ = paging.requests.send(());
+        }
+    }
+
+    fn load_next_account_page(&mut self) {
+        if let Some(paging) = &mut self.paging
+            && !paging.loading
+            && paging.has_more
+            && paging.requests.send(()).is_ok()
+        {
+            paging.loading = true;
+            paging.retry_required = false;
+            paging.message = "Loading next account page…".into();
+        }
+    }
+
     fn key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return true;
+        }
+        if key.code == KeyCode::Char('n') && self.paging.is_some() {
+            self.load_next_account_page();
+            return false;
         }
         if self.raw.is_some() {
             let mut copy = None;
@@ -470,6 +683,15 @@ impl App {
                 if !self.view.nodes.is_empty() {
                     self.selected = (self.selected + 1).min(self.view.nodes.len() - 1);
                 }
+                if self.history.is_empty()
+                    && self.paging.as_ref().is_some_and(|paging| {
+                        paging.scanned > 0
+                            && !paging.retry_required
+                            && self.selected >= paging.scanned.saturating_sub(10)
+                    })
+                {
+                    self.load_next_account_page();
+                }
                 false
             }
             KeyCode::Enter => {
@@ -483,13 +705,19 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.raw = Some(Raw {
-                    text: raw_text(&self.view.raw),
+                    text: raw_text(&view_json(
+                        &self.view,
+                        self.paging.is_some() && self.history.is_empty(),
+                    )),
                     scroll: 0,
                 });
                 false
             }
             KeyCode::Char('c') => {
-                self.copy(raw_text(&self.view.raw));
+                self.copy(raw_text(&view_json(
+                    &self.view,
+                    self.paging.is_some() && self.history.is_empty(),
+                )));
                 false
             }
             _ => false,
@@ -502,9 +730,7 @@ impl App {
         if !node.openable {
             return;
         }
-        self.history.push((self.view.clone(), self.selected));
-        self.selected = 0;
-        self.view = View {
+        let next = View {
             title: node.label,
             raw: node.raw,
             presentation: if let Some(bytes) = node.bytes {
@@ -516,6 +742,9 @@ impl App {
             },
             nodes: node.children,
         };
+        let previous = std::mem::replace(&mut self.view, next);
+        self.history.push((previous, self.selected));
+        self.selected = 0;
     }
     fn back(&mut self) {
         if let Some((view, selected)) = self.history.pop() {
@@ -619,11 +848,24 @@ impl App {
         }
     }
     fn tree(&self, frame: &mut Frame, area: Rect) {
+        if self.view.nodes.is_empty()
+            && let Some(paging) = &self.paging
+        {
+            frame.render_widget(
+                Paragraph::new(paging.message.as_str()).block(Self::block(&self.view.title)),
+                area,
+            );
+            return;
+        }
         let width = usize::from(area.width.saturating_sub(36)).max(12);
+        let visible_count = usize::from(area.height.saturating_sub(2)).max(1);
+        let start = self.selected.saturating_sub(visible_count - 1);
         let items: Vec<_> = self
             .view
             .nodes
             .iter()
+            .skip(start)
+            .take(visible_count)
             .map(|node| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
@@ -634,7 +876,14 @@ impl App {
                     Span::styled(truncate(&node.ty, 16), Style::default().fg(Color::Yellow)),
                     Span::raw("  "),
                     Span::styled(
-                        truncate(&node.preview, width),
+                        truncate(
+                            if !node.openable && node.raw.is_null() {
+                                "Waiting for details…"
+                            } else {
+                                &node.preview
+                            },
+                            width,
+                        ),
                         if node.warning {
                             Style::default().fg(Color::Yellow)
                         } else {
@@ -653,13 +902,18 @@ impl App {
             )
             .highlight_symbol("› ");
         let mut state = ListState::default();
-        state.select(Some(self.selected));
+        state.select(Some(self.selected.saturating_sub(start)));
         frame.render_stateful_widget(list, area, &mut state);
     }
     fn footer(&self, frame: &mut Frame, area: Rect, help: &str) {
+        let mut lines = vec![Line::raw(
+            self.status.as_ref().map_or(help, |(message, _)| message),
+        )];
+        if let Some(paging) = &self.paging {
+            lines.push(Line::raw(&paging.message));
+        }
         frame.render_widget(
-            Paragraph::new(self.status.as_ref().map_or(help, |(message, _)| message))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(lines).style(Style::default().fg(Color::DarkGray)),
             area,
         )
     }
@@ -989,6 +1243,200 @@ mod tests {
             serde_json::from_str::<Value>(&app.raw.as_ref().unwrap().text).unwrap(),
             serde_json::to_value(&schema.accounts[0]).unwrap()
         );
+    }
+
+    #[test]
+    fn arriving_account_pages_preserve_the_open_detail_and_update_root_json() {
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let document = |accounts: &[DecodedAccount]| {
+            account_document(accounts, &account_type(), &BTreeMap::new(), metadata())
+        };
+        let mut app = App::new(document(&[]));
+        app.paging = Some(AccountPaging::new(updates_rx, requests_tx));
+        updates_tx
+            .send(AccountPageUpdate::Discovered {
+                addresses: vec![account().address, "NextAccount".into()],
+                account_type: "State".into(),
+            })
+            .unwrap();
+        app.poll_account_pages();
+        assert_eq!(app.view.nodes.len(), 2);
+        assert!(!app.view.nodes[0].openable);
+        assert_eq!(view_json(&app.view, true)[0]["status"], "pending");
+        assert!(requests_rx.try_recv().is_err());
+        app.request_account_page();
+        assert!(requests_rx.try_recv().is_ok());
+        updates_tx
+            .send(AccountPageUpdate::Loaded {
+                document: document(&[account()]),
+                start: 0,
+                scanned: 1,
+                total: 2,
+            })
+            .unwrap();
+        app.poll_account_pages();
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let detail = app.view.raw.clone();
+        app.request_account_page();
+        assert!(requests_rx.try_recv().is_err());
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(requests_rx.try_recv().is_ok());
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(requests_rx.try_recv().is_err());
+
+        let mut next = account();
+        next.address = "NextAccount".into();
+        updates_tx
+            .send(AccountPageUpdate::Loaded {
+                document: document(&[next]),
+                start: 1,
+                scanned: 2,
+                total: 2,
+            })
+            .unwrap();
+        app.poll_account_pages();
+        assert_eq!(app.view.raw, detail);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.view.nodes.len(), 2);
+        assert_eq!(app.view.raw.as_array().unwrap().len(), 2);
+        assert_eq!(app.view.nodes[1].label, "NextAccount");
+        assert!(app.view.nodes[1].openable);
+        assert!(app.view.raw[1].get("status").is_none());
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(requests_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn account_pages_wait_for_navigation_and_prefetch_at_each_page_boundary() {
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(account_document(
+            &[],
+            &account_type(),
+            &BTreeMap::new(),
+            metadata(),
+        ));
+        app.paging = Some(AccountPaging::new(updates_rx, requests_tx));
+        let addresses = (0..250)
+            .map(|index| format!("Account{index}"))
+            .collect::<Vec<_>>();
+        updates_tx
+            .send(AccountPageUpdate::Discovered {
+                addresses: addresses.clone(),
+                account_type: "State".into(),
+            })
+            .unwrap();
+        app.poll_account_pages();
+        app.request_account_page();
+        assert!(requests_rx.try_recv().is_ok());
+        let send_page = |start: usize, end: usize| {
+            let accounts = addresses[start..end]
+                .iter()
+                .map(|address| DecodedAccount {
+                    address: address.clone(),
+                    ..account()
+                })
+                .collect::<Vec<_>>();
+            updates_tx
+                .send(AccountPageUpdate::Loaded {
+                    document: account_document(
+                        &accounts,
+                        &account_type(),
+                        &BTreeMap::new(),
+                        metadata(),
+                    ),
+                    start,
+                    scanned: end,
+                    total: addresses.len(),
+                })
+                .unwrap();
+        };
+        for (start, end) in [(0, 100), (100, 200)] {
+            send_page(start, end);
+            app.poll_account_pages();
+            app.request_account_page();
+            assert!(requests_rx.try_recv().is_err());
+            app.selected = end - 12;
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert!(requests_rx.try_recv().is_err());
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert!(requests_rx.try_recv().is_ok());
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+            assert!(requests_rx.try_recv().is_err());
+        }
+        send_page(200, 250);
+        app.poll_account_pages();
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.selected = 248;
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(requests_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn large_account_lists_render_the_selected_addresses_before_details_load() {
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(account_document(
+            &[],
+            &account_type(),
+            &BTreeMap::new(),
+            metadata(),
+        ));
+        app.paging = Some(AccountPaging::new(updates_rx, requests_tx));
+        updates_tx
+            .send(AccountPageUpdate::Discovered {
+                addresses: (0..200_000)
+                    .map(|index| format!("Account{index:06}"))
+                    .collect(),
+                account_type: "State".into(),
+            })
+            .unwrap();
+        app.poll_account_pages();
+        assert!(requests_rx.try_recv().is_err());
+        app.selected = 199_999;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Account199999"));
+        assert!(text.contains("Waiting for details"));
+        assert!(!text.contains("Account000000"));
+        app.request_account_page();
+        assert!(requests_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn failed_account_page_can_be_retried_without_losing_loaded_accounts() {
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(account_document(
+            &[account()],
+            &account_type(),
+            &BTreeMap::new(),
+            metadata(),
+        ));
+        app.paging = Some(AccountPaging::new(updates_rx, requests_tx));
+        updates_tx
+            .send(AccountPageUpdate::Failed("RPC unavailable".into()))
+            .unwrap();
+        app.poll_account_pages();
+        assert!(
+            app.paging
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("RPC unavailable")
+        );
+        assert_eq!(app.view.nodes.len(), 1);
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(requests_rx.try_recv().is_ok());
     }
 
     #[test]

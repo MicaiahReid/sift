@@ -25,6 +25,15 @@ serialized unsigned wire transaction, base64 by default.
 to drill in, Esc to go back, `r` to view JSON, `c` to copy, and `q` to quit.
 Pass `--no-tui` or pipe the output to print JSON.
 
+`account list` opens the browser while matching addresses are discovered. It
+lists those addresses as soon as discovery finishes, then fills in their details
+in batches of 100. After the first batch, press `n` or scroll past row 90 of
+the loaded range to fetch the next 100. Pending rows show “Waiting for details”;
+loaded rows can be opened immediately. Press `n` to retry a failed request. You can
+browse or quit while requests are in flight. JSON viewing and copying include
+all discovered addresses, with a `status` for pending or unavailable accounts.
+With `--no-tui` or piped output, the command prints the complete decoded JSON.
+
 ## Configuration
 
 The default registry is `~/.config/sift/registry.toml` (or the platform
