@@ -21,19 +21,31 @@ use crate::nodes::{
     value_node_to_json,
 };
 
-/// Details about bytes present after an IDL account layout has been decoded.
+/// Details about bytes an IDL account layout did not describe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AccountDecodeInfo {
-    /// Total bytes not described by the IDL layout.
+    /// Total bytes not described by the IDL layout: bytes after the layout
+    /// plus bytes left unread inside size-bounded regions such as
+    /// `fixedSizeTypeNode` and `sizePrefixTypeNode`.
     pub trailing_byte_count: usize,
-    /// Number of non-zero bytes among the trailing bytes.
+    /// Number of non-zero bytes among the undescribed bytes.
     pub non_zero_trailing_byte_count: usize,
 }
 
 impl AccountDecodeInfo {
-    /// Whether trailing bytes contain non-zero data beyond expected allocation padding.
+    /// Whether undescribed bytes contain non-zero data beyond expected padding.
     pub fn has_unmodelled_data(self) -> bool {
         self.non_zero_trailing_byte_count > 0
+    }
+
+    fn record(&mut self, bytes: &[u8]) {
+        self.trailing_byte_count += bytes.len();
+        self.non_zero_trailing_byte_count += bytes.iter().filter(|byte| **byte != 0).count();
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.trailing_byte_count += other.trailing_byte_count;
+        self.non_zero_trailing_byte_count += other.non_zero_trailing_byte_count;
     }
 }
 
@@ -75,12 +87,7 @@ pub fn decode_account_with_info(
     if !matches_discriminators(&account.discriminators, bytes) {
         bail!("account data does not match {} discriminator", account.name)
     }
-    let mut decoder = Decoder {
-        bytes,
-        offset: 0,
-        definitions,
-        trim_nulls: false,
-    };
+    let mut decoder = Decoder::new(bytes, definitions);
     debug!(account = %account.name, byte_length = bytes.len(), "decoding account data");
     let value = match decoder.decode(&account.ty) {
         Ok(value) => value,
@@ -89,11 +96,8 @@ pub fn decode_account_with_info(
             return Err(error);
         }
     };
-    let trailing = &bytes[decoder.offset.min(bytes.len())..];
-    let info = AccountDecodeInfo {
-        trailing_byte_count: trailing.len(),
-        non_zero_trailing_byte_count: trailing.iter().filter(|byte| **byte != 0).count(),
-    };
+    let mut info = decoder.unread;
+    info.record(&bytes[decoder.offset.min(bytes.len())..]);
     debug!(
         account = %account.name,
         decoded_length = decoder.offset,
@@ -290,9 +294,22 @@ struct Decoder<'a> {
     definitions: &'a BTreeMap<String, Value>,
     /// Fixed-size strings are zero padded; the padding is not part of the text.
     trim_nulls: bool,
+    /// Bytes left unread inside size-bounded regions, which the layout does
+    /// not describe and a re-encode would overwrite with zeros.
+    unread: AccountDecodeInfo,
 }
 
 impl<'a> Decoder<'a> {
+    fn new(bytes: &'a [u8], definitions: &'a BTreeMap<String, Value>) -> Self {
+        Decoder {
+            bytes,
+            offset: 0,
+            definitions,
+            trim_nulls: false,
+            unread: AccountDecodeInfo::default(),
+        }
+    }
+
     fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         let end = self
             .offset
@@ -312,13 +329,16 @@ impl<'a> Decoder<'a> {
         rest
     }
 
-    fn sub(&self, bytes: &'a [u8], trim_nulls: bool) -> Decoder<'a> {
-        Decoder {
-            bytes,
-            offset: 0,
-            definitions: self.definitions,
+    /// Decodes `ty` from a bounded slice, recording bytes the inner layout leaves unread.
+    fn decode_bounded(&mut self, slice: &'a [u8], trim_nulls: bool, ty: &Value) -> Result<Value> {
+        let mut inner = Decoder {
             trim_nulls,
-        }
+            ..Decoder::new(slice, self.definitions)
+        };
+        let value = inner.decode(ty)?;
+        self.unread.merge(inner.unread);
+        self.unread.record(&slice[inner.offset.min(slice.len())..]);
+        Ok(value)
     }
 
     fn decode(&mut self, ty: &Value) -> Result<Value> {
@@ -350,7 +370,7 @@ impl<'a> Decoder<'a> {
             "sizePrefixTypeNode" => {
                 let length = self.read_length(child(ty, "prefix")?)?;
                 let slice = self.take(length)?;
-                self.sub(slice, false).decode(child(ty, "type")?)
+                self.decode_bounded(slice, false, child(ty, "type")?)
             }
             "fixedSizeTypeNode" => {
                 let size = child(ty, "size")?
@@ -358,7 +378,7 @@ impl<'a> Decoder<'a> {
                     .and_then(|size| usize::try_from(size).ok())
                     .context("fixedSizeTypeNode size must be an integer")?;
                 let slice = self.take(size)?;
-                self.sub(slice, true).decode(child(ty, "type")?)
+                self.decode_bounded(slice, true, child(ty, "type")?)
             }
             "arrayTypeNode" | "setTypeNode" => {
                 let item = child(ty, "item")?;
@@ -476,7 +496,7 @@ impl<'a> Decoder<'a> {
                     .context("sentinel not found")?;
                 let slice = &rest[..position];
                 self.offset += position + sentinel.len();
-                self.sub(slice, false).decode(child(ty, "type")?)
+                self.decode_bounded(slice, false, child(ty, "type")?)
             }
             other => bail!("unsupported Codama type node {other}"),
         }
@@ -496,7 +516,12 @@ impl<'a> Decoder<'a> {
             }
             None => {
                 while self.offset < self.bytes.len() {
+                    let before = self.offset;
                     items.push(item(self)?);
+                    // An item that consumes nothing would repeat forever.
+                    if self.offset == before {
+                        bail!("remainder item consumed no bytes; the sequence cannot terminate")
+                    }
                 }
             }
         }
@@ -606,13 +631,12 @@ impl<'a> Decoder<'a> {
         let variants = child(ty, "variants")?
             .as_array()
             .context("enumTypeNode variants must be an array")?;
-        let mut next = 0_i128;
-        for variant in variants {
+        for (index, variant) in variants.iter().enumerate() {
+            // Codama defaults a variant's discriminator to its index.
             let value = variant
                 .get("discriminator")
                 .and_then(Value::as_i64)
-                .map_or(next, i128::from);
-            next = value + 1;
+                .map_or(index as i128, i128::from);
             if value != discriminator {
                 continue;
             }
@@ -1051,8 +1075,20 @@ pub fn encode_type(
             encode_padding(ty, output.len() - start, output)
         }
         "sentinelTypeNode" => {
-            encode_type(child(ty, "type")?, value, definitions, output)?;
-            output.extend_from_slice(&encode_constant(child(ty, "sentinel")?, definitions)?);
+            let sentinel = encode_constant(child(ty, "sentinel")?, definitions)?;
+            let mut inner = Vec::new();
+            encode_type(child(ty, "type")?, value, definitions, &mut inner)?;
+            // The decoder stops at the first sentinel, so one inside the value
+            // would truncate it and shift everything that follows.
+            if !sentinel.is_empty()
+                && inner
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_slice())
+            {
+                bail!("value contains the sentinel bytes {sentinel:?} that delimit it")
+            }
+            output.extend_from_slice(&inner);
+            output.extend_from_slice(&sentinel);
             Ok(())
         }
         other => bail!("unsupported Codama type node {other}"),
@@ -1178,16 +1214,17 @@ fn encode_enum(
         _ => bail!("enum value must be a variant name or an object with kind and optional fields"),
     };
     let size = ty.get("size").cloned().unwrap_or_else(default_u8);
-    let mut next = 0_i64;
-    for variant in child(ty, "variants")?
+    for (index, variant) in child(ty, "variants")?
         .as_array()
         .context("enumTypeNode variants must be an array")?
+        .iter()
+        .enumerate()
     {
+        // Codama defaults a variant's discriminator to its index.
         let discriminator = variant
             .get("discriminator")
             .and_then(Value::as_i64)
-            .unwrap_or(next);
-        next = discriminator + 1;
+            .unwrap_or(index as i64);
         if variant.get("name").and_then(Value::as_str) != Some(variant_name) {
             continue;
         }
@@ -1383,12 +1420,7 @@ mod tests {
         assert_eq!(&bytes[8..15], [5, 0, b'h', b'e', b'l', b'l', b'o']);
         assert_eq!(&bytes[15..19], [0, 0, 1, 2]);
         assert_eq!(&bytes[19..21], [0xfe, 0xff]);
-        let mut decoder = Decoder {
-            bytes: &bytes,
-            offset: 0,
-            definitions: &definitions,
-            trim_nulls: false,
-        };
+        let mut decoder = Decoder::new(&bytes, &definitions);
         assert_eq!(decoder.decode(&ty).unwrap(), value);
         assert_eq!(decoder.offset, bytes.len());
     }
@@ -1399,22 +1431,90 @@ mod tests {
         let mut bytes = Vec::new();
         encode_type(&ty, &json!("-1"), &BTreeMap::new(), &mut bytes).unwrap();
         assert_eq!(bytes, vec![0xff; 32]);
-        let mut decoder = Decoder {
-            bytes: &bytes,
-            offset: 0,
-            definitions: &BTreeMap::new(),
-            trim_nulls: false,
-        };
-        assert_eq!(decoder.decode(&ty).unwrap(), json!("-1"));
+        let definitions = BTreeMap::new();
+        assert_eq!(
+            Decoder::new(&bytes, &definitions).decode(&ty).unwrap(),
+            json!("-1")
+        );
         let max = "57896044618658097711785492504343953926634992332820282019728792003956564819967";
         let mut bytes = Vec::new();
         encode_type(&ty, &json!(max), &BTreeMap::new(), &mut bytes).unwrap();
-        let mut decoder = Decoder {
-            bytes: &bytes,
-            offset: 0,
-            definitions: &BTreeMap::new(),
-            trim_nulls: false,
-        };
-        assert_eq!(decoder.decode(&ty).unwrap(), json!(max));
+        assert_eq!(
+            Decoder::new(&bytes, &definitions).decode(&ty).unwrap(),
+            json!(max)
+        );
+    }
+
+    fn single_field_account(name: &str, ty: Value) -> AccountSchema {
+        AccountSchema {
+            name: name.into(),
+            discriminators: vec![],
+            ty: struct_node(vec![struct_field("value", ty)]),
+        }
+    }
+
+    /// Bytes left unread inside a bounded region used to be dropped silently,
+    /// so `[7, 42, 0, 0]` decoded as clean and re-encoded as `[7, 0, 0, 0]`.
+    #[test]
+    fn reports_non_zero_bytes_left_inside_bounded_regions() {
+        let definitions = BTreeMap::new();
+        let fixed = single_field_account("fixed", fixed_size(number("u8"), 4));
+        let (value, info) = decode_account_with_info(&fixed, &definitions, &[7, 42, 0, 0]).unwrap();
+        assert_eq!(value["value"], 7);
+        assert_eq!(info.trailing_byte_count, 3);
+        assert_eq!(info.non_zero_trailing_byte_count, 1);
+        let (_, info) = decode_account_with_info(&fixed, &definitions, &[7, 0, 0, 0]).unwrap();
+        assert!(!info.has_unmodelled_data());
+
+        let prefixed = single_field_account("prefixed", size_prefix(number("u8"), number("u8")));
+        let (_, info) = decode_account_with_info(&prefixed, &definitions, &[2, 7, 1]).unwrap();
+        assert!(info.has_unmodelled_data());
+    }
+
+    #[test]
+    fn rejects_remainder_items_that_consume_no_bytes() {
+        let definitions = BTreeMap::new();
+        let ty = array(nodes::tuple(vec![]), json!({"kind": "remainderCountNode"}));
+        assert!(Decoder::new(&[1], &definitions).decode(&ty).is_err());
+        assert_eq!(
+            Decoder::new(&[], &definitions).decode(&ty).unwrap(),
+            json!([])
+        );
+    }
+
+    /// Codama assigns an unspecified variant discriminator from the variant's
+    /// index, not from the previous variant's explicit value.
+    #[test]
+    fn defaults_enum_discriminators_to_variant_indices() {
+        let definitions = BTreeMap::new();
+        let ty = enum_node(
+            vec![
+                json!({"kind": "enumEmptyVariantTypeNode", "name": "first", "discriminator": 5}),
+                json!({"kind": "enumEmptyVariantTypeNode", "name": "second"}),
+            ],
+            number("u8"),
+        );
+        assert_eq!(
+            Decoder::new(&[1], &definitions).decode(&ty).unwrap(),
+            json!({"kind": "second"})
+        );
+        assert!(Decoder::new(&[6], &definitions).decode(&ty).is_err());
+        let mut bytes = Vec::new();
+        encode_type(&ty, &json!("second"), &definitions, &mut bytes).unwrap();
+        assert_eq!(bytes, vec![1]);
+    }
+
+    #[test]
+    fn rejects_values_that_contain_their_sentinel() {
+        let definitions = BTreeMap::new();
+        let ty = json!({
+            "kind": "sentinelTypeNode",
+            "type": string("utf8"),
+            "sentinel": constant_value(number("u8"), json!({"kind": "numberValueNode", "number": 0})),
+        });
+        let mut bytes = Vec::new();
+        assert!(encode_type(&ty, &json!("a\0b"), &definitions, &mut bytes).is_err());
+        encode_type(&ty, &json!("ab"), &definitions, &mut bytes).unwrap();
+        assert_eq!(bytes, b"ab\0");
     }
 }

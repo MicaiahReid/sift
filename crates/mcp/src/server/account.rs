@@ -337,7 +337,7 @@ pub(super) async fn list(server: &SiftServer, params: AccountListParams) -> Resu
         object.insert(
             "note".to_owned(),
             json!(format!(
-                "{noted} returned account(s) marked `trailing_data` carry bytes after the IDL layout that the IDL does not describe; the decoded fields are still valid."
+                "{noted} returned account(s) marked `trailing_data` carry bytes the IDL layout does not describe; the decoded fields are still valid."
             )),
         );
     }
@@ -407,7 +407,7 @@ pub(super) async fn get(server: &SiftServer, params: AccountGetParams) -> Result
         object.insert(
             "note".to_owned(),
             json!(format!(
-                "Parsed with {} unmodelled trailing byte(s) ({} non-zero); the IDL does not describe this data.",
+                "Parsed with {} unmodelled byte(s) ({} non-zero); the IDL does not describe this data.",
                 info.trailing_byte_count, info.non_zero_trailing_byte_count
             )),
         );
@@ -430,7 +430,7 @@ pub(super) async fn patch(server: &SiftServer, params: AccountPatchParams) -> Re
     let (mut value, info) = decode_account_with_info(layout, &schema.types, &bytes)?;
     if info.has_unmodelled_data() {
         bail!(
-            "cannot patch {}: the IDL does not describe {} trailing byte(s), {} of which are non-zero; patching would discard them",
+            "cannot patch {}: the IDL does not describe {} byte(s), {} of which are non-zero; patching would discard them",
             layout.name,
             info.trailing_byte_count,
             info.non_zero_trailing_byte_count

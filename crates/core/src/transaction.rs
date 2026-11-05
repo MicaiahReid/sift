@@ -5,7 +5,9 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sift_types::{Discriminator, InstructionSchema, OptionalAccountStrategy, ProgramSchema};
+use sift_types::{
+    Discriminator, FieldSchema, InstructionSchema, OptionalAccountStrategy, ProgramSchema,
+};
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
@@ -232,14 +234,18 @@ fn default_address(default_value: Option<&Value>, program_address: &str) -> Opti
 /// Encodes instruction data from caller arguments and Codama defaults.
 ///
 /// Arguments the caller leaves out fall back to their default value node.
-/// Constant discriminators that no argument produces are inserted at their
-/// declared offset.
+/// A constant discriminator that an argument's default would produce must
+/// come from that argument, so overriding it with a conflicting value is an
+/// error. A constant discriminator that no argument describes is inserted at
+/// its declared offset, which must fall on an argument boundary.
 fn instruction_data(
     instruction: &InstructionSchema,
     args: &BTreeMap<String, Value>,
     definitions: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
     let mut data = Vec::new();
+    let mut boundaries = vec![0];
+    let mut defaults = Vec::new();
     for field in &instruction.args {
         let default;
         let value = match (args.get(&field.name), &field.default_value) {
@@ -251,8 +257,11 @@ fn instruction_data(
             (Some(value), None) => value,
             (None, None) => bail!("missing argument {}", field.name),
         };
+        let start = data.len();
         encode_type(&field.ty, value, definitions, &mut data)
             .with_context(|| format!("argument {}", field.name))?;
+        boundaries.push(data.len());
+        defaults.push((start, field, encoded_default(field, definitions)));
     }
     for discriminator in &instruction.discriminators {
         let Discriminator::Constant { offset, bytes, .. } = discriminator else {
@@ -261,12 +270,30 @@ fn instruction_data(
         if data.get(*offset..offset + bytes.len()) == Some(bytes.as_slice()) {
             continue;
         }
-        if *offset > data.len() {
-            bail!("instruction discriminator offset {offset} is beyond the encoded arguments")
+        if let Some((_, field, _)) = defaults.iter().find(|(start, _, default)| {
+            start == offset && default.as_deref().is_some_and(|d| d.starts_with(bytes))
+        }) {
+            bail!(
+                "argument {} must encode the instruction discriminator {bytes:?}; omit it to use its default",
+                field.name
+            )
+        }
+        if !boundaries.contains(offset) {
+            bail!(
+                "instruction discriminator at offset {offset} falls inside an encoded argument and no argument describes it"
+            )
         }
         data.splice(offset..offset, bytes.iter().copied());
     }
     Ok(data)
+}
+
+/// Encodes an argument's default value, or `None` when it has none or fails to encode.
+fn encoded_default(field: &FieldSchema, definitions: &BTreeMap<String, Value>) -> Option<Vec<u8>> {
+    let value = value_node_to_json(field.default_value.as_ref()?).ok()?;
+    let mut bytes = Vec::new();
+    encode_type(&field.ty, &value, definitions, &mut bytes).ok()?;
+    Some(bytes)
 }
 
 fn parse_address(value: &str) -> Result<Address> {
@@ -288,4 +315,77 @@ fn to_kebab(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::number;
+    use serde_json::json;
+
+    fn tagged_instruction(omitted: bool, declare_argument: bool) -> InstructionSchema {
+        let mut args = vec![FieldSchema {
+            name: "amount".into(),
+            ty: number("u8"),
+            default_value: None,
+            omitted: false,
+        }];
+        if declare_argument {
+            args.insert(
+                0,
+                FieldSchema {
+                    name: "tag".into(),
+                    ty: number("u8"),
+                    default_value: Some(json!({"kind": "numberValueNode", "number": 3})),
+                    omitted,
+                },
+            );
+        }
+        InstructionSchema {
+            name: "tagged".into(),
+            discriminators: vec![Discriminator::Constant {
+                offset: 0,
+                bytes: vec![3],
+                inferred: false,
+            }],
+            args,
+            accounts: vec![],
+            optional_account_strategy: OptionalAccountStrategy::ProgramId,
+        }
+    }
+
+    /// Overriding a non-omitted discriminator argument used to splice the
+    /// expected tag in front of the caller's value, shifting every field.
+    #[test]
+    fn rejects_arguments_that_conflict_with_the_discriminator() {
+        let definitions = BTreeMap::new();
+        let instruction = tagged_instruction(false, true);
+        let mut args = BTreeMap::new();
+        args.insert("amount".to_owned(), json!(9));
+        assert_eq!(
+            instruction_data(&instruction, &args, &definitions).unwrap(),
+            vec![3, 9]
+        );
+        args.insert("tag".to_owned(), json!(4));
+        let error = instruction_data(&instruction, &args, &definitions).unwrap_err();
+        assert!(error.to_string().contains("argument tag"), "{error}");
+
+        let omitted = tagged_instruction(true, true);
+        assert_eq!(
+            instruction_data(&omitted, &args, &definitions).unwrap(),
+            vec![3, 9]
+        );
+    }
+
+    #[test]
+    fn inserts_discriminators_no_argument_describes() {
+        let definitions = BTreeMap::new();
+        let instruction = tagged_instruction(false, false);
+        let mut args = BTreeMap::new();
+        args.insert("amount".to_owned(), json!(9));
+        assert_eq!(
+            instruction_data(&instruction, &args, &definitions).unwrap(),
+            vec![3, 9]
+        );
+    }
 }

@@ -113,15 +113,17 @@ struct Discovery<'a> {
 impl Discovery<'_> {
     /// Validates one file and records it once.
     ///
-    /// When `require_declared_address` is set the document must name the
-    /// requested program itself; Anchor.toml matches skip that check because
-    /// legacy Anchor IDLs carry no address.
+    /// An `opportunistic` file was found by scanning rather than named by
+    /// configuration: it must declare the requested program address itself,
+    /// and one that cannot be read is skipped instead of failing discovery.
+    /// Anchor.toml matches are not opportunistic because legacy Anchor IDLs
+    /// carry no address.
     fn consider(
         &mut self,
         path: &Path,
         member_dir: &Path,
         program_name: Option<&str>,
-        require_declared_address: bool,
+        opportunistic: bool,
     ) -> Result<()> {
         if !path.is_file() {
             return Ok(());
@@ -133,15 +135,23 @@ impl Discovery<'_> {
             trace!(path = %canonical.display(), "skipping duplicate discovered IDL");
             return Ok(());
         }
-        let Some(document) = read_idl_document(&canonical)? else {
-            trace!(path = %canonical.display(), "skipping non-IDL JSON");
-            return Ok(());
+        let document = match read_idl_document(&canonical) {
+            Ok(Some(document)) => document,
+            Ok(None) => {
+                trace!(path = %canonical.display(), "skipping non-IDL JSON");
+                return Ok(());
+            }
+            Err(error) if opportunistic => {
+                debug!(path = %canonical.display(), error = %error, "skipping unreadable file during IDL scan");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
         };
         let Some(format) = detect_format(&document) else {
             return Ok(());
         };
         let declared = declared_program_address(&document);
-        if require_declared_address && declared.as_deref() != Some(self.program_address) {
+        if opportunistic && declared.as_deref() != Some(self.program_address) {
             trace!(path = %canonical.display(), ?declared, "IDL declares a different program");
             return Ok(());
         }
@@ -184,16 +194,21 @@ fn read_idl_document(path: &Path) -> Result<Option<Value>> {
     if metadata.len() > MAX_SCANNED_IDL_BYTES {
         return Ok(None);
     }
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("cannot read discovered IDL {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("cannot read discovered IDL {}", path.display()))?;
+    // JSON must be UTF-8, so anything else cannot be an IDL.
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
     // Both dialects contain one of these keys; package manifests and lockfiles do not.
     if !(text.contains("\"rootNode\"")
         || text.contains("\"programNode\"")
-        || text.contains("\"instructions\""))
+        || text.contains("\"instructions\"")
+        || text.contains("\"accounts\""))
     {
         return Ok(None);
     }
-    Ok(serde_json::from_str(&text).ok())
+    Ok(serde_json::from_str(text).ok())
 }
 
 fn idl_program_name(document: &Value, format: IdlFormat) -> Option<String> {
@@ -586,6 +601,8 @@ mod tests {
             r#"{"name": "x", "instructions": "none"}"#,
         )
         .unwrap();
+        // A binary fixture with a .json name must not abort the scan.
+        write(temp.path().join("program/fixture.json"), [0xff, 0xfe, b'{']).unwrap();
 
         let candidates = discover_local_idls(&temp.path().join("program"), ADDRESS).unwrap();
         let paths = candidates
