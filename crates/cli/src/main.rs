@@ -20,7 +20,7 @@ struct Cli {
     /// Explicit registry TOML path.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
-    /// Solana RPC endpoint or localhost/devnet/testnet/mainnet shorthand.
+    /// Solana RPC endpoint or localhost/devnet/testnet/mainnet shorthand (defaults to mainnet).
     #[arg(long, global = true)]
     url: Option<String>,
     /// RPC commitment used for read-only account queries.

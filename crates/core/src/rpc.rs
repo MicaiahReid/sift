@@ -24,12 +24,11 @@ pub struct RpcAccount {
 }
 
 impl RpcClient {
-    /// Creates a client with the public mainnet endpoint as the final default.
+    /// Creates a client using the supplied URL or cluster shorthand, defaulting to public mainnet.
     pub fn new(url: Option<String>, commitment: String) -> Result<Self> {
         let url = url
             .as_deref()
             .map(expand_url_shorthand)
-            .or_else(solana_cli_rpc_url)
             .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_owned());
         debug!(endpoint = %url, commitment, "initialized RPC client");
         Ok(Self {
@@ -211,20 +210,6 @@ pub fn expand_url_shorthand(value: &str) -> String {
     }
 }
 
-/// Reads `json_rpc_url` from the Solana CLI's conventional config when present.
-fn solana_cli_rpc_url() -> Option<String> {
-    let config = directories::BaseDirs::new()?
-        .home_dir()
-        .join(".config/solana/cli/config.yml");
-    let text = std::fs::read_to_string(config).ok()?;
-    text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("json_rpc_url:")
-            .map(|value| value.trim().trim_matches(['\'', '"']).to_owned())
-            .filter(|value| !value.is_empty())
-    })
-}
-
 fn decode_data(value: &Value) -> Result<Option<Vec<u8>>> {
     let Some(data) = value.get("data").and_then(Value::as_array) else {
         return Ok(None);
@@ -250,6 +235,15 @@ mod tests {
         net::TcpListener,
         time::Duration,
     };
+
+    #[test]
+    fn defaults_to_mainnet_unless_an_endpoint_is_supplied() {
+        let default = RpcClient::new(None, "confirmed".into()).unwrap();
+        assert_eq!(default.url, "https://api.mainnet-beta.solana.com");
+
+        let local = RpcClient::new(Some("localhost".into()), "confirmed".into()).unwrap();
+        assert_eq!(local.url, "http://127.0.0.1:8899");
+    }
 
     #[tokio::test]
     async fn discovers_addresses_without_data_and_preserves_missing_account_positions() {

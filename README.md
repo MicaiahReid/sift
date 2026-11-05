@@ -73,7 +73,9 @@ equivalent). Use `--config PATH` to select another registry and `--idl PATH`
 to use an IDL without persisting it.
 
 `--url` accepts a full RPC URL or the `localhost`, `devnet`, `testnet`,
-`mainnet`, and `mainnet-beta` cluster shorthands.
+`mainnet`, and `mainnet-beta` cluster shorthands. CLI and MCP requests default
+to `https://api.mainnet-beta.solana.com`, independently of the Solana CLI
+configuration. Use `--url` to override it, or `rpc_url` for an individual MCP call.
 
 Use `sift idl add PROGRAM --idl-url URL` to register an HTTP(S) IDL document;
 `--url` is reserved for the Solana RPC endpoint.
