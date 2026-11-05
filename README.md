@@ -21,6 +21,9 @@ sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg 
 The CLI never signs or sends a transaction. `transaction build` emits a
 serialized unsigned wire transaction, base64 by default.
 
+The `account`, `transaction`, and `idl` command groups also accept their plural
+forms: `accounts`, `transactions`, and `idls`.
+
 `idl list` and `idl show` open an interactive browser in a terminal. Use Enter
 to drill in, Esc to go back, `r` to view JSON, `c` to copy, and `q` to quit.
 Pass `--no-tui` or pipe the output to print JSON.
