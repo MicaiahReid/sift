@@ -23,6 +23,13 @@ pub(crate) struct IdlCommand {
 
 #[derive(Subcommand, Debug)]
 enum IdlSubcommand {
+    /// Add an alias to an existing IDL registry entry.
+    Alias {
+        /// Existing program alias or base58 address.
+        program: String,
+        /// New friendly alias for the program.
+        alias: String,
+    },
     /// Add an IDL source at highest precedence.
     Add {
         /// Program base58 address.
@@ -73,6 +80,11 @@ impl IdlCommand {
         context: &ContextOptions,
     ) -> Result<()> {
         match self.command {
+            IdlSubcommand::Alias { program, alias } => {
+                registry.add_alias(&program, &alias)?;
+                registry.save().await?;
+                print_status(&format!("Registered alias {alias} for {program}"));
+            }
             IdlSubcommand::Add {
                 program,
                 file,

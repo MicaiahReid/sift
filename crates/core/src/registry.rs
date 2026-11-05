@@ -84,8 +84,36 @@ impl Registry {
             }
         }
         debug!(program, "using explicit program address");
-        validate_address(program)?;
+        validate_address(program).map_err(|_| {
+            anyhow::anyhow!("could not find {program}; unknown alias and invalid address")
+        })?;
         Ok(program.to_owned())
+    }
+
+    /// Adds an alias to a registered program selected by address or existing alias.
+    /// Returns an error if the program is unregistered, the alias is blank, or
+    /// the alias resolves to a different program.
+    pub fn add_alias(&mut self, program: &str, alias: &str) -> Result<()> {
+        let address = self.program_address(program)?;
+        if !self.config.programs.contains_key(&address) {
+            bail!("program {program} is not registered")
+        }
+        if alias.trim().is_empty() {
+            bail!("alias must not be blank")
+        }
+        if let Ok(existing) = self.program_address(alias)
+            && existing != address
+        {
+            bail!("alias {alias} resolves to a different program: {existing}")
+        }
+        self.config
+            .programs
+            .get_mut(&address)
+            .expect("registered program exists")
+            .aliases
+            .insert(alias.to_owned());
+        debug!(address, alias, "added IDL registry alias");
+        Ok(())
     }
 
     /// Adds a source at highest precedence, retaining all lower-priority sources.
@@ -273,6 +301,86 @@ mod tests {
     use super::*;
 
     const ADDRESS: &str = "11111111111111111111111111111111";
+
+    #[test]
+    fn unknown_program_reports_alias_and_address_resolution_failure() {
+        let registry = Registry {
+            path: PathBuf::from("registry.toml"),
+            config: RegistryConfig::default(),
+        };
+
+        for program in ["bad-alias-bad-address", "abc"] {
+            let error = registry.program_address(program).unwrap_err();
+            assert_eq!(
+                format!("{error:#}"),
+                format!("could not find {program}; unknown alias and invalid address")
+            );
+        }
+        assert_eq!(registry.program_address(ADDRESS).unwrap(), ADDRESS);
+    }
+
+    #[tokio::test]
+    async fn added_aliases_persist_without_changing_sources_or_existing_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.toml");
+        let mut registry = Registry::load(Some(path.clone())).await.unwrap();
+        let source = IdlSource::File {
+            name: "demo".to_owned(),
+            path: PathBuf::from("demo.json"),
+        };
+        registry
+            .add_source(ADDRESS, source.clone(), Some("demo".to_owned()))
+            .unwrap();
+        let sources = registry.config.programs[ADDRESS].sources.clone();
+        let priority = registry.config.programs[ADDRESS].priority.clone();
+
+        registry.add_alias(ADDRESS, "example").unwrap();
+        registry.add_alias("example", "another-alias").unwrap();
+        registry.add_alias("demo", "example").unwrap();
+        registry.save().await.unwrap();
+
+        let loaded = Registry::load(Some(path)).await.unwrap();
+        for alias in ["demo", "example", "another-alias"] {
+            assert_eq!(loaded.program_address(alias).unwrap(), ADDRESS);
+        }
+        assert_eq!(loaded.config.programs[ADDRESS].aliases.len(), 3);
+        assert_eq!(loaded.config.programs[ADDRESS].sources, sources);
+        assert_eq!(loaded.config.programs[ADDRESS].priority, priority);
+    }
+
+    #[test]
+    fn alias_errors_leave_the_registry_unchanged() {
+        let mut registry = Registry {
+            path: PathBuf::from("registry.toml"),
+            config: RegistryConfig::default(),
+        };
+        let other_address = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        for (address, alias) in [(ADDRESS, "demo"), (other_address, "token")] {
+            registry
+                .add_source(
+                    address,
+                    IdlSource::File {
+                        name: "demo".to_owned(),
+                        path: PathBuf::from("demo.json"),
+                    },
+                    Some(alias.to_owned()),
+                )
+                .unwrap();
+        }
+        let before = registry.json();
+
+        for (program, alias) in [
+            ("missing", "example"),
+            ("BPFLoaderUpgradeab1e11111111111111111111111", "example"),
+            ("demo", "token"),
+            ("demo", other_address),
+            ("demo", ""),
+            ("demo", "   "),
+        ] {
+            assert!(registry.add_alias(program, alias).is_err());
+            assert_eq!(registry.json(), before);
+        }
+    }
 
     #[test]
     fn records_all_discovered_aliases() {

@@ -10,6 +10,8 @@ IDLs directly and a practical common subset of Codama-style IDLs.
 sift idl add PROGRAM --file target/idl/example.json
 sift --url mainnet idl add PROGRAM --onchain
 sift idl prefer PROGRAM local-1
+sift idl alias PROGRAM example
+sift idl alias example another-alias
 sift account list State --program PROGRAM
 sift account patch ADDRESS --program PROGRAM --set authority=NEW_ADDRESS
 sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg amount=10
