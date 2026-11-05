@@ -1,13 +1,13 @@
 //! Account inspection and offline byte-patching commands.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::Value;
 use sift_types::{AccountSchema, ProgramSchema};
 use tokio::sync::mpsc;
 
 use sift_core::{
-    Registry, RpcClient, decode_account_with_info, discriminator_filter, encode_account,
+    Registry, RpcClient, account_filters, decode_account_with_info, detect_layout, encode_account,
     find_account, patch_value,
 };
 use tracing::debug;
@@ -90,7 +90,7 @@ impl AccountCommand {
                     rpc_url: rpc.url.clone(),
                     commitment: rpc.commitment.clone(),
                 };
-                let filters = discriminator_filter(layout);
+                let filters = account_filters(layout);
                 if should_run(no_tui, true) {
                     return browse_accounts(rpc, schema, account_type, metadata, filters).await;
                 }
@@ -116,19 +116,8 @@ impl AccountCommand {
                     .account_data(&address)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("account {address} does not exist"))?;
-                let layout = if let Some(account_type) = account_type {
-                    find_account(&schema, &account_type)?
-                } else {
-                    schema
-                        .accounts
-                        .iter()
-                        .find(|layout| bytes.starts_with(&layout.discriminator))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "no registered account discriminator matches; use --type"
-                            )
-                        })?
-                };
+                let layout = detect_layout(&schema, &bytes, account_type.as_deref())
+                    .context("select the layout with --type")?;
                 let (mut value, decode_info) =
                     decode_account_with_info(layout, &schema.types, &bytes)?;
                 if decode_info.has_unmodelled_data() {

@@ -101,7 +101,7 @@ pub(crate) async fn read_value_json(
     }
 }
 
-/// Loads a program schema, discovering a local Anchor IDL only after normal resolution fails.
+/// Loads a program schema, discovering a local Anchor or Codama IDL only after normal resolution fails.
 pub(crate) async fn resolve_schema(
     registry: &mut Registry,
     program: &str,
@@ -331,21 +331,22 @@ fn select_candidate(candidates: &[LocalIdlCandidate], no_input: bool) -> Result<
             .collect::<Vec<_>>()
             .join(", ");
         anyhow::bail!(
-            "multiple local Anchor IDLs match this program; use --idl or select one interactively: {paths}"
+            "multiple local IDLs match this program; use --idl or select one interactively: {paths}"
         );
     }
     let choices = candidates
         .iter()
         .map(|candidate| {
             format!(
-                "{} ({})",
+                "{} [{}] ({})",
                 display_path(&candidate.idl_path),
+                candidate.format.label(),
                 display_path(&candidate.member_dir)
             )
         })
         .collect::<Vec<_>>();
     let selected = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select a local Anchor IDL")
+        .with_prompt("Select a local IDL")
         .items(&choices)
         .default(0)
         .interact_opt()?

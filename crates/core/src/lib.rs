@@ -1,9 +1,12 @@
-//! IDL loading, Borsh-compatible layouts, RPC access, and unsigned transaction building.
+//! IDL loading, Codama-driven Borsh layouts, RPC access, and unsigned transaction building.
 
 pub mod accounts;
+pub mod anchor;
+pub mod codama;
 pub mod codec;
 pub mod discovery;
 pub mod idl;
+pub mod nodes;
 pub mod program_metadata;
 pub mod query;
 pub mod registry;
@@ -13,15 +16,17 @@ pub mod summary;
 pub mod transaction;
 
 pub use accounts::{
-    DecodedAccount, DecodedAccounts, decode_accounts, detect_layout, discriminator_filter,
+    DecodedAccount, DecodedAccounts, account_filters, decode_accounts, detect_layout,
     fetch_decoded_accounts,
 };
 pub use codec::{
     AccountDecodeInfo, decode_account, decode_account_with_info, encode_account, lookup_path,
-    parse_cli_value, patch_value,
+    matches_discriminators, parse_cli_value, patch_value,
 };
 pub use discovery::{LocalIdlCandidate, discover_local_idls};
-pub use idl::{find_account, find_instruction, parse_idl};
+pub use idl::{
+    IdlFormat, declared_program_address, detect_format, find_account, find_instruction, parse_idl,
+};
 pub use program_metadata::{CanonicalIdl, discover_canonical_idl, load_canonical_idl};
 pub use query::{Aggregate, AggregateOp, Condition, Operator};
 pub use registry::{LoadedSchema, Registry, default_registry_path};

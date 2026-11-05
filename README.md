@@ -1,8 +1,9 @@
 # sift
 
 `sift` is a Rust CLI for inspecting Solana program accounts, applying offline
-IDL-aware byte patches, and building unsigned transactions. It accepts Anchor
-IDLs directly and a practical common subset of Codama-style IDLs.
+IDL-aware byte patches, and building unsigned transactions. It reads Codama
+IDLs (`rootNode` documents, including canonical on-chain Program Metadata IDLs)
+and Anchor IDLs (legacy and 0.30+), which are converted into Codama nodes.
 
 ## Quick start
 
@@ -95,12 +96,43 @@ RUST_LOG=sift_core::rpc=debug,sift=debug sift account list State --program PROGR
 
 Debug RPC logs include the complete JSON-RPC request payload and response.
 
-If no schema is registered, `sift` searches the nearest Cargo workspace for
-Anchor member projects whose `Anchor.toml` declares the requested program ID.
-It checks `<member>/target/idl` first, then `<workspace>/target/idl`. In an
-interactive terminal, it asks before registering a discovered IDL. With
-`--no-input`, a single match is used only for that invocation and is never
-persisted; ambiguous matches require `--idl` or an interactive selection.
+If no schema is registered, `sift` searches the nearest Cargo workspace for a
+local IDL in three ways: Anchor member projects whose `Anchor.toml` declares
+the requested program ID (`<member>/target/idl` first, then
+`<workspace>/target/idl`), `codama.json` configuration files whose `idl` path
+names the program, and any other JSON document in the project that parses as a
+Codama or Anchor IDL and declares the program address. In an interactive
+terminal, it asks before registering a discovered IDL. With `--no-input`, a
+single match is used only for that invocation and is never persisted;
+ambiguous matches require `--idl` or an interactive selection.
+
+## IDL support
+
+Every schema is held as Codama type nodes, so the decoder supports the full
+Codama type system: numbers of any width and endianness, booleans, public keys,
+strings and bytes with size prefixes, fixed sizes, sentinels or remainder
+semantics, arrays, sets and maps with fixed, prefixed or remainder counts,
+tuples, structs, enums with explicit discriminator values and tuple or struct
+variants, prefixed, fixed, zeroable and remainder options, hidden prefixes and
+suffixes, offsets, defined type links, and amount, date-time and SOL amount
+wrappers.
+
+Account types are matched by their Codama discriminators (`constant`, `field`
+and `size` discriminator nodes). Anchor IDLs contribute their usual eight-byte
+discriminators. When a Codama IDL declares no discriminator for an account but
+the layout starts with a field named like a discriminator whose values are
+listed in an enum (`accountDiscriminator { plan = 1, ... }`), sift infers the
+byte pattern from the enum variant named after the account and marks it as
+`inferred` in `sift idl show`. Account types with no discriminator at all are
+listed by fetching every program account and keeping those that decode
+cleanly.
+
+Decoded JSON uses numbers for integers up to 32 bits and floats, decimal
+strings for wider integers, base58 strings for public keys, arrays of integers
+for byte sequences, `{"kind": VARIANT, "fields": ...}` objects for enums, and
+arrays of `{"key", "value"}` entries for maps. Fields whose Codama
+`defaultValueStrategy` is `omitted`, such as Anchor discriminators, are hidden
+from decoded output and filled from their defaults when encoding.
 
 Canonical on-chain Program Metadata IDLs can be registered with `--onchain`.
 Sift validates and pins the canonical `idl` metadata PDA, then revalidates it

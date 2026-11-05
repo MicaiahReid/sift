@@ -1,33 +1,47 @@
-//! Local Cargo-workspace and Anchor project IDL discovery.
+//! Local IDL discovery for Anchor and Codama projects.
+//!
+//! Three strategies run from the nearest Cargo workspace or package root:
+//!
+//! 1. `Anchor.toml` program tables name the program; the matching
+//!    `target/idl/<name>.json` is used even when the IDL declares no address.
+//! 2. `codama.json` configuration files point at an IDL through their `idl`
+//!    key; the IDL is used when it declares the requested program address.
+//! 3. Any other JSON document in the project that parses as an Anchor or
+//!    Codama IDL and declares the requested program address.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 use tracing::{debug, trace};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::idl::parse_idl;
+use crate::idl::{IdlFormat, declared_program_address, detect_format, parse_idl};
 
-/// A validated local Anchor IDL associated with a requested program address.
+/// IDL documents larger than this are not sniffed during the project scan.
+const MAX_SCANNED_IDL_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A validated local IDL associated with a requested program address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalIdlCandidate {
-    /// The Anchor program name used as the IDL filename stem.
+    /// The program name declared by the IDL or its Anchor.toml entry.
     pub program_name: String,
-    /// Cargo workspace member that declared the matching program address.
+    /// Project directory the IDL belongs to.
     pub member_dir: PathBuf,
     /// Existing and parseable IDL JSON document.
     pub idl_path: PathBuf,
+    /// Dialect of the document.
+    pub format: IdlFormat,
 }
 
-/// Finds parseable Anchor IDLs for a program from the nearest Cargo workspace.
+/// Finds parseable Anchor or Codama IDLs for a program from the nearest Cargo project.
 ///
 /// The closest ancestor Cargo workspace is used when present; otherwise the
-/// closest package manifest is used. Its package and workspace members are inspected for
-/// `Anchor.toml`; each matching program is looked up in member then workspace
-/// `target/idl` directories.
+/// closest package manifest is used. Results are sorted by path and contain
+/// no duplicates.
 pub fn discover_local_idls(start: &Path, program_address: &str) -> Result<Vec<LocalIdlCandidate>> {
     let Some(root) = nearest_cargo_root(start)? else {
         debug!(start = %start.display(), "no Cargo project found for local IDL discovery");
@@ -42,9 +56,12 @@ pub fn discover_local_idls(start: &Path, program_address: &str) -> Result<Vec<Lo
         anchor_project_count = anchor_projects.len(),
         "discovered local project candidates"
     );
-    let mut candidates = Vec::new();
-    let mut seen = BTreeSet::new();
-    for member_dir in anchor_projects {
+    let mut discovery = Discovery {
+        program_address,
+        candidates: Vec::new(),
+        seen: BTreeSet::new(),
+    };
+    for member_dir in &anchor_projects {
         let anchor_toml = member_dir.join("Anchor.toml");
         if !anchor_toml.is_file() {
             trace!(path = %member_dir.display(), "skipping project without Anchor.toml");
@@ -58,35 +75,205 @@ pub fn discover_local_idls(start: &Path, program_address: &str) -> Result<Vec<Lo
                     trace!(path = %path.display(), "expected IDL file not found");
                     continue;
                 }
-                let canonical = path
-                    .canonicalize()
-                    .with_context(|| format!("cannot resolve discovered IDL {}", path.display()))?;
-                if !seen.insert(canonical.clone()) {
-                    trace!(path = %canonical.display(), "skipping duplicate discovered IDL");
-                    continue;
-                }
-                let text = fs::read_to_string(&canonical).with_context(|| {
-                    format!("cannot read discovered IDL {}", canonical.display())
-                })?;
-                if parse_idl(&text, program_address).is_ok() {
-                    debug!(path = %canonical.display(), program_name, "accepted discovered local IDL");
-                    candidates.push(LocalIdlCandidate {
-                        program_name: program_name.clone(),
-                        member_dir: member_dir.clone(),
-                        idl_path: canonical,
-                    });
-                } else {
-                    trace!(path = %canonical.display(), "skipping unsupported discovered IDL");
-                }
+                discovery.consider(&path, member_dir, Some(&program_name), false)?;
             }
         }
     }
+    for config in codama_configs(&root)? {
+        let Some(idl_path) = codama_config_idl(&config)? else {
+            continue;
+        };
+        let member_dir = config.parent().unwrap_or(&root).to_path_buf();
+        discovery.consider(&idl_path, &member_dir, None, true)?;
+    }
+    for path in project_json_files(&root, &members)? {
+        let member_dir = members
+            .iter()
+            .filter(|member| path.starts_with(member))
+            .max_by_key(|member| member.components().count())
+            .cloned()
+            .unwrap_or_else(|| root.clone());
+        discovery.consider(&path, &member_dir, None, true)?;
+    }
+    let mut candidates = discovery.candidates;
     candidates.sort_by(|left, right| left.idl_path.cmp(&right.idl_path));
     debug!(
         candidate_count = candidates.len(),
         "completed local IDL discovery"
     );
     Ok(candidates)
+}
+
+struct Discovery<'a> {
+    program_address: &'a str,
+    candidates: Vec<LocalIdlCandidate>,
+    seen: BTreeSet<PathBuf>,
+}
+
+impl Discovery<'_> {
+    /// Validates one file and records it once.
+    ///
+    /// When `require_declared_address` is set the document must name the
+    /// requested program itself; Anchor.toml matches skip that check because
+    /// legacy Anchor IDLs carry no address.
+    fn consider(
+        &mut self,
+        path: &Path,
+        member_dir: &Path,
+        program_name: Option<&str>,
+        require_declared_address: bool,
+    ) -> Result<()> {
+        if !path.is_file() {
+            return Ok(());
+        }
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("cannot resolve discovered IDL {}", path.display()))?;
+        if self.seen.contains(&canonical) {
+            trace!(path = %canonical.display(), "skipping duplicate discovered IDL");
+            return Ok(());
+        }
+        let Some(document) = read_idl_document(&canonical)? else {
+            trace!(path = %canonical.display(), "skipping non-IDL JSON");
+            return Ok(());
+        };
+        let Some(format) = detect_format(&document) else {
+            return Ok(());
+        };
+        let declared = declared_program_address(&document);
+        if require_declared_address && declared.as_deref() != Some(self.program_address) {
+            trace!(path = %canonical.display(), ?declared, "IDL declares a different program");
+            return Ok(());
+        }
+        if declared
+            .as_deref()
+            .is_some_and(|declared| declared != self.program_address)
+        {
+            debug!(path = %canonical.display(), declared, "Anchor.toml IDL declares another program address; skipping");
+            return Ok(());
+        }
+        if let Err(error) = parse_idl(&document.to_string(), self.program_address) {
+            trace!(path = %canonical.display(), error = %error, "skipping unsupported discovered IDL");
+            return Ok(());
+        }
+        let program_name = program_name
+            .map(ToOwned::to_owned)
+            .or_else(|| idl_program_name(&document, format))
+            .unwrap_or_else(|| {
+                canonical
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        debug!(path = %canonical.display(), program_name, format = format.label(), "accepted discovered local IDL");
+        self.seen.insert(canonical.clone());
+        self.candidates.push(LocalIdlCandidate {
+            program_name,
+            member_dir: member_dir.to_path_buf(),
+            idl_path: canonical,
+            format,
+        });
+        Ok(())
+    }
+}
+
+/// Reads a JSON file when it plausibly holds an IDL, skipping huge or unrelated files cheaply.
+fn read_idl_document(path: &Path) -> Result<Option<Value>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("cannot inspect discovered IDL {}", path.display()))?;
+    if metadata.len() > MAX_SCANNED_IDL_BYTES {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("cannot read discovered IDL {}", path.display()))?;
+    // Both dialects contain one of these keys; package manifests and lockfiles do not.
+    if !(text.contains("\"rootNode\"")
+        || text.contains("\"programNode\"")
+        || text.contains("\"instructions\""))
+    {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str(&text).ok())
+}
+
+fn idl_program_name(document: &Value, format: IdlFormat) -> Option<String> {
+    match format {
+        IdlFormat::Codama => document
+            .pointer("/program/name")
+            .or_else(|| document.get("name")),
+        IdlFormat::Anchor => document
+            .pointer("/metadata/name")
+            .or_else(|| document.get("name")),
+    }
+    .and_then(Value::as_str)
+    .map(ToOwned::to_owned)
+}
+
+/// Finds every `codama.json` configuration in the project.
+fn codama_configs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut configs = Vec::new();
+    for entry in WalkDir::new(root).into_iter().filter_entry(should_visit) {
+        let entry =
+            entry.with_context(|| format!("cannot scan local workspace {}", root.display()))?;
+        if entry.file_type().is_file() && entry.file_name() == "codama.json" {
+            configs.push(entry.into_path());
+        }
+    }
+    Ok(configs)
+}
+
+/// Resolves the `idl` path named by a Codama configuration file.
+fn codama_config_idl(config: &Path) -> Result<Option<PathBuf>> {
+    let text =
+        fs::read_to_string(config).with_context(|| format!("cannot read {}", config.display()))?;
+    let Ok(document) = serde_json::from_str::<Value>(&text) else {
+        debug!(path = %config.display(), "codama.json is not valid JSON");
+        return Ok(None);
+    };
+    let Some(idl) = document.get("idl").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let base = config.parent().unwrap_or(Path::new("."));
+    Ok(Some(base.join(idl)))
+}
+
+/// Lists JSON files worth sniffing for an IDL: the project tree minus build
+/// and dependency directories, plus the conventional `idl` output directories.
+fn project_json_files(root: &Path, members: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = BTreeSet::new();
+    for entry in WalkDir::new(root).into_iter().filter_entry(should_visit) {
+        let entry =
+            entry.with_context(|| format!("cannot scan local workspace {}", root.display()))?;
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        {
+            files.insert(entry.into_path());
+        }
+    }
+    for directory in members
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(root))
+        .flat_map(|member| [member.join("target/idl"), member.join("idl")])
+    {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            {
+                files.insert(path);
+            }
+        }
+    }
+    Ok(files.into_iter().collect())
 }
 
 fn anchor_project_dirs(root: &Path, members: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -116,7 +303,7 @@ fn should_visit(entry: &DirEntry) -> bool {
     }
     !matches!(
         entry.file_name().to_str(),
-        Some(".git" | "target" | "node_modules" | "vendor")
+        Some(".git" | "target" | "node_modules" | "vendor" | "dist" | ".next")
     )
 }
 
@@ -234,6 +421,13 @@ mod tests {
     use tempfile::TempDir;
 
     const ADDRESS: &str = "11111111111111111111111111111111";
+    const OTHER: &str = "22222222222222222222222222222222";
+
+    fn codama_idl(address: &str) -> String {
+        format!(
+            r#"{{"kind":"rootNode","standard":"codama","version":"1.0.0","program":{{"kind":"programNode","name":"demo","publicKey":"{address}","version":"0.1.0","accounts":[],"instructions":[{{"kind":"instructionNode","name":"ping","accounts":[],"arguments":[]}}],"definedTypes":[],"pdas":[],"errors":[]}}}}"#
+        )
+    }
 
     #[test]
     fn finds_member_target_idl_before_workspace_target() {
@@ -266,6 +460,7 @@ mod tests {
             candidates[0].idl_path,
             member.join("target/idl/demo.json").canonicalize().unwrap()
         );
+        assert_eq!(candidates[0].format, IdlFormat::Anchor);
     }
 
     #[test]
@@ -345,5 +540,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(discover_local_idls(temp.path(), ADDRESS).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn discovers_codama_idls_through_config_and_declared_address() {
+        let temp = TempDir::new().unwrap();
+        write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"program\"]\n",
+        )
+        .unwrap();
+        create_dir_all(temp.path().join("program/idl")).unwrap();
+        write(
+            temp.path().join("program/Cargo.toml"),
+            "[package]\nname = \"program\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        // Referenced by codama.json, outside the scanned tree.
+        create_dir_all(temp.path().join("target/generated")).unwrap();
+        write(
+            temp.path().join("target/generated/idl.json"),
+            codama_idl(ADDRESS),
+        )
+        .unwrap();
+        write(
+            temp.path().join("codama.json"),
+            r#"{"idl": "target/generated/idl.json", "scripts": {}}"#,
+        )
+        .unwrap();
+        // Found by scanning; declares the requested program.
+        write(
+            temp.path().join("program/idl/program.codama.json"),
+            codama_idl(ADDRESS),
+        )
+        .unwrap();
+        // Declares another program and must be ignored.
+        write(
+            temp.path().join("program/idl/other.json"),
+            codama_idl(OTHER),
+        )
+        .unwrap();
+        // Unrelated JSON must not be reported.
+        write(
+            temp.path().join("package.json"),
+            r#"{"name": "x", "instructions": "none"}"#,
+        )
+        .unwrap();
+
+        let candidates = discover_local_idls(&temp.path().join("program"), ADDRESS).unwrap();
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.idl_path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                temp.path()
+                    .join("program/idl/program.codama.json")
+                    .canonicalize()
+                    .unwrap(),
+                temp.path()
+                    .join("target/generated/idl.json")
+                    .canonicalize()
+                    .unwrap(),
+            ]
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.format == IdlFormat::Codama)
+        );
+        assert_eq!(candidates[0].program_name, "demo");
+        assert_eq!(
+            candidates[0].member_dir,
+            temp.path().join("program").canonicalize().unwrap()
+        );
     }
 }

@@ -351,6 +351,15 @@ pub(super) async fn list(server: &SiftServer, params: AccountListParams) -> Resu
             }),
         );
     }
+    if decoded.unmatched > 0 {
+        object.insert(
+            "unmatched".to_owned(),
+            json!({
+                "count": decoded.unmatched,
+                "note": "The IDL declares no discriminator for this account type, so every program account was fetched and matched by decoding; these did not decode as this layout.",
+            }),
+        );
+    }
     if cache_age > std::time::Duration::ZERO {
         object.insert("cache_age_secs".to_owned(), json!(cache_age.as_secs()));
     }
