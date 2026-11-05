@@ -8,6 +8,8 @@ IDLs directly and a practical common subset of Codama-style IDLs.
 
 ```sh
 sift idl add PROGRAM --file target/idl/example.json
+sift --url mainnet idl add PROGRAM --onchain
+sift idl prefer PROGRAM local-1
 sift account list State --program PROGRAM
 sift account patch ADDRESS --program PROGRAM --set authority=NEW_ADDRESS
 sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg amount=10
@@ -24,6 +26,9 @@ to use an IDL without persisting it.
 
 `--url` accepts a full RPC URL or the `localhost`, `devnet`, `testnet`,
 `mainnet`, and `mainnet-beta` cluster shorthands.
+
+Use `sift idl add PROGRAM --idl-url URL` to register an HTTP(S) IDL document;
+`--url` is reserved for the Solana RPC endpoint.
 
 ## Debug logging
 
@@ -43,3 +48,10 @@ It checks `<member>/target/idl` first, then `<workspace>/target/idl`. In an
 interactive terminal, it asks before registering a discovered IDL. With
 `--no-input`, a single match is used only for that invocation and is never
 persisted; ambiguous matches require `--idl` or an interactive selection.
+
+Canonical on-chain Program Metadata IDLs can be registered with `--onchain`.
+Sift validates and pins the canonical `idl` metadata PDA, then revalidates it
+when loading. Discovered local and on-chain sources are independently offered
+for registration; source IDs and the per-program `priority` list are shown by
+`sift idl list`. `sift idl prefer PROGRAM SOURCE_ID` changes the preferred
+source while retaining lower-priority fallbacks.

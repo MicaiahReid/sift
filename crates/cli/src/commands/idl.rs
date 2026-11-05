@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use sift_core::Registry;
+use sift_core::{Registry, RpcClient, discover_canonical_idl};
 use sift_types::IdlSource;
 use tracing::debug;
 
@@ -28,17 +28,24 @@ enum IdlSubcommand {
         /// Program base58 address.
         program: String,
         /// Local JSON IDL.
-        #[arg(long, conflicts_with_all = ["url", "onchain"])]
+        #[arg(long, conflicts_with_all = ["idl_url", "onchain"])]
         file: Option<PathBuf>,
         /// HTTP(S) JSON IDL.
-        #[arg(long, conflicts_with_all = ["file", "onchain"])]
-        url: Option<url::Url>,
+        #[arg(long = "idl-url", conflicts_with_all = ["file", "onchain"])]
+        idl_url: Option<url::Url>,
         /// Register the canonical on-chain source.
-        #[arg(long, conflicts_with_all = ["file", "url"])]
+        #[arg(long, conflicts_with_all = ["file", "idl_url"])]
         onchain: bool,
         /// Friendly alias for the program.
         #[arg(long)]
         alias: Option<String>,
+    },
+    /// Move a registered source to highest precedence.
+    Prefer {
+        /// Program alias or base58 address.
+        program: String,
+        /// Stable source identifier shown by `idl list`.
+        source: String,
     },
     /// Browse the registry interactively when possible, otherwise print JSON.
     List {
@@ -69,11 +76,11 @@ impl IdlCommand {
             IdlSubcommand::Add {
                 program,
                 file,
-                url,
+                idl_url,
                 onchain,
                 alias,
             } => {
-                let source = match (file, url, onchain) {
+                let source = match (file, idl_url, onchain) {
                     (Some(path), None, false) => {
                         let name = file_source_name(&path);
                         IdlSource::File { name, path }
@@ -82,10 +89,17 @@ impl IdlCommand {
                         name: url.to_string(),
                         url,
                     },
-                    (None, None, true) | (None, None, false) => IdlSource::OnChain {
-                        name: "canonical-onchain".to_owned(),
-                        address: None,
-                    },
+                    (None, None, true) => {
+                        let rpc = RpcClient::new(context.url.clone(), context.commitment.clone())?;
+                        let idl = discover_canonical_idl(&rpc, &program).await?;
+                        IdlSource::OnChain {
+                            name: "canonical-onchain".to_owned(),
+                            address: idl.address,
+                        }
+                    }
+                    (None, None, false) => {
+                        bail!("select one of --file, --idl-url, or --onchain")
+                    }
                     _ => unreachable!(),
                 };
                 debug!(program, source = ?source, alias = ?alias, "adding IDL registry source");
@@ -106,6 +120,11 @@ impl IdlCommand {
                 } else {
                     println!("{}", serde_json::to_string_pretty(&registry.json())?);
                 }
+            }
+            IdlSubcommand::Prefer { program, source } => {
+                registry.prefer_source(&program, &source)?;
+                registry.save().await?;
+                print_status(&format!("Preferred IDL source {source} for {program}"));
             }
             IdlSubcommand::Show { program } => println!(
                 "{}",

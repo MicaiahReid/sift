@@ -27,9 +27,12 @@ pub struct ProgramConfig {
     /// Alternative local names accepted anywhere a program address is accepted.
     #[serde(default)]
     pub aliases: BTreeSet<String>,
-    /// Sources in highest-to-lowest priority order.
+    /// Sources indexed by stable identifiers used by `priority`.
     #[serde(default)]
-    pub sources: Vec<IdlSource>,
+    pub sources: BTreeMap<String, IdlSource>,
+    /// Source identifiers in highest-to-lowest priority order.
+    #[serde(default)]
+    pub priority: Vec<String>,
 }
 
 /// A resolvable location holding an IDL document.
@@ -50,12 +53,12 @@ pub enum IdlSource {
         /// HTTP(S) location of the JSON document.
         url: Url,
     },
-    /// The program's canonical on-chain IDL, resolved through PMP then Anchor.
+    /// A verified canonical Program Metadata IDL account.
     OnChain {
         /// Stable display name for this source.
         name: String,
-        /// Optional explicitly supplied IDL account address.
-        address: Option<String>,
+        /// Verified Program Metadata account address.
+        address: String,
     },
 }
 

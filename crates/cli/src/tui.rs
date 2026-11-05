@@ -153,10 +153,9 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
         .map(|(address, program)| {
             let aliases = program.aliases.iter().cloned().collect::<Vec<_>>();
             let sources = program
-                .sources
+                .priority
                 .iter()
-                .enumerate()
-                .map(|(index, source)| source_node(index, source))
+                .filter_map(|id| program.sources.get(id).map(|source| source_node(id, source)))
                 .collect::<Vec<_>>();
             Node {
                 label: address.clone(),
@@ -166,7 +165,7 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
                     count_label(aliases.len(), "alias"),
                     count_label(sources.len(), "source")
                 ),
-                raw: json!({"address":address,"aliases":aliases,"sources":program.sources}),
+                raw: json!({"address":address,"aliases":aliases,"sources":program.sources,"priority":program.priority}),
                 children: vec![
                     Node {
                         label: "Aliases".into(),
@@ -188,6 +187,16 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
                         preview: count_label(sources.len(), "source"),
                         raw: serde_json::to_value(&program.sources).expect("sources serialize"),
                         children: sources,
+                        bytes: None,
+                        openable: true,
+                        warning: false,
+                    },
+                    Node {
+                        label: "Priority".into(),
+                        ty: String::new(),
+                        preview: program.priority.join(", "),
+                        raw: json!(program.priority),
+                        children: program.priority.iter().map(|id| source_field(id, json!(id), id.clone())).collect(),
                         bytes: None,
                         openable: true,
                         warning: false,
@@ -257,18 +266,15 @@ fn source_field(label: &str, raw: Value, preview: String) -> Node {
         warning: false,
     }
 }
-fn source_node(index: usize, source: &IdlSource) -> Node {
+fn source_node(id: &str, source: &IdlSource) -> Node {
     let (ty, location) = match source {
         IdlSource::File { path, .. } => ("file", path.display().to_string()),
         IdlSource::Url { url, .. } => ("url", url.to_string()),
-        IdlSource::OnChain { address, .. } => (
-            "on-chain",
-            address.clone().unwrap_or_else(|| "canonical IDL".into()),
-        ),
+        IdlSource::OnChain { address, .. } => ("on-chain", address.clone()),
     };
     let raw = serde_json::to_value(source).expect("source serializes");
     Node {
-        label: format!("[{}] {ty}", index + 1),
+        label: format!("[{id}] {ty}"),
         ty: String::new(),
         preview: location,
         raw: raw.clone(),
@@ -296,11 +302,7 @@ fn source_children(source: &IdlSource) -> Vec<Node> {
         }
         IdlSource::OnChain { name, address } => vec![
             source_field("Name", json!(name), name.clone()),
-            source_field(
-                "Address",
-                json!(address),
-                address.clone().unwrap_or_else(|| "canonical IDL".into()),
-            ),
+            source_field("Address", json!(address), address.clone()),
         ],
     }
 }

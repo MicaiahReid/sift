@@ -14,6 +14,15 @@ pub struct RpcClient {
     client: reqwest::Client,
 }
 
+/// Account bytes together with the owning program address.
+#[derive(Clone, Debug)]
+pub struct RpcAccount {
+    /// Account owner reported by the cluster.
+    pub owner: String,
+    /// Decoded account data.
+    pub data: Vec<u8>,
+}
+
 impl RpcClient {
     /// Creates a client with the public mainnet endpoint as the final default.
     pub fn new(url: Option<String>, commitment: String) -> Result<Self> {
@@ -53,7 +62,7 @@ impl RpcClient {
     }
 
     /// Gets one account's base64 bytes, or `None` when it does not exist.
-    pub async fn account_data(&self, address: &str) -> Result<Option<Vec<u8>>> {
+    pub async fn account(&self, address: &str) -> Result<Option<RpcAccount>> {
         let result = self
             .call(
                 "getAccountInfo",
@@ -63,7 +72,18 @@ impl RpcClient {
         let Some(value) = result.get("value").filter(|value| !value.is_null()) else {
             return Ok(None);
         };
-        decode_data(value)
+        let owner = value
+            .get("owner")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("account has no owner"))?
+            .to_owned();
+        let data = decode_data(value)?.ok_or_else(|| anyhow::anyhow!("account has no data"))?;
+        Ok(Some(RpcAccount { owner, data }))
+    }
+
+    /// Gets one account's base64 bytes, or `None` when it does not exist.
+    pub async fn account_data(&self, address: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.account(address).await?.map(|account| account.data))
     }
 
     /// Gets all program-owned accounts as `(address, bytes)` pairs.
