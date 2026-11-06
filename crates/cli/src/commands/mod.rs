@@ -2,4 +2,5 @@
 
 pub mod account;
 pub mod idl;
+pub mod program;
 pub mod transaction;

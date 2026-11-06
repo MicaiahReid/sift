@@ -27,10 +27,12 @@ use tracing::debug;
 
 mod account;
 mod idl;
+mod program;
 mod transaction;
 
 pub use account::{AccountGetParams, AccountListParams, AccountPatchParams};
 pub use idl::{IdlAddParams, IdlAliasParams, IdlPreferParams, IdlRemoveParams, IdlShowParams};
+pub use program::ProgramShowParams;
 pub use transaction::TransactionBuildParams;
 
 const REGISTRY_RESOURCE_URI: &str = "sift://registry";
@@ -50,6 +52,9 @@ Typical flow:
 keep responses small. For counts, totals, or extremes use `aggregate` with `limit: 0` instead of \
 paging through rows.
 4. `account_get` decodes a single address; the owning program's IDL is used when `program` is omitted.
+
+`program_show` reports a program's upgrade authority, ProgramData and on-chain IDL addresses, and \
+verified build.
 
 Programs without a registered IDL are registered automatically from the canonical on-chain \
 Program Metadata IDL when one exists. Otherwise call `idl_add` with a file or URL.
@@ -218,6 +223,18 @@ impl SiftServer {
         Parameters(params): Parameters<IdlShowParams>,
     ) -> Result<CallToolResult, McpError> {
         respond(idl::show(self, params).await)
+    }
+
+    #[tool(
+        name = "program_show",
+        description = "Describes a deployed program: its loader, ProgramData address, upgrade authority (null when immutable), last deployed slot, canonical on-chain Program Metadata IDL address, and, on mainnet, its OtterSec verified build (source repository, commit, and executable hash) when the deployed binary matches one. Accepts registered aliases.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn program_show(
+        &self,
+        Parameters(params): Parameters<ProgramShowParams>,
+    ) -> Result<CallToolResult, McpError> {
+        respond(program::show(self, params).await)
     }
 
     #[tool(

@@ -7,6 +7,7 @@ pub mod codec;
 pub mod discovery;
 pub mod idl;
 pub mod nodes;
+pub mod program;
 pub mod program_metadata;
 pub mod query;
 pub mod registry;
@@ -27,7 +28,10 @@ pub use discovery::{LocalIdlCandidate, discover_local_idls};
 pub use idl::{
     IdlFormat, declared_program_address, detect_format, find_account, find_instruction, parse_idl,
 };
-pub use program_metadata::{CanonicalIdl, discover_canonical_idl, load_canonical_idl};
+pub use program::{ProgramInfo, VerifiedBuild, inspect_program, inspect_programs};
+pub use program_metadata::{
+    CanonicalIdl, canonical_idl_address, discover_canonical_idl, load_canonical_idl,
+};
 pub use query::{Aggregate, AggregateOp, Condition, Operator};
 pub use registry::{LoadedSchema, Registry, default_registry_path};
 pub use resolve::{AutoResolvedSchema, resolve_schema_auto};
