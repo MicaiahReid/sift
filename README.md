@@ -83,8 +83,9 @@ registry JSON.
 
 ## Configuration
 
-The default registry is `~/.config/sift/registry.toml` (or the platform
-equivalent). Use `--config PATH` to select another registry and `--idl PATH`
+The default registry is `~/.config/sift/registry.toml` on macOS and Linux
+(respecting `XDG_CONFIG_HOME`), and `%APPDATA%\solana\sift\config\registry.toml`
+on Windows. Use `--config PATH` to select another registry and `--idl PATH`
 to use an IDL without persisting it.
 
 `--url` accepts a full RPC URL or the `localhost`, `devnet`, `testnet`,
