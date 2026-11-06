@@ -1,154 +1,217 @@
 # sift
 
-`sift` is a Rust CLI for inspecting Solana program accounts, applying offline
-IDL-aware byte patches, and building unsigned transactions. It reads Codama
-IDLs (`rootNode` documents, including canonical on-chain Program Metadata IDLs)
-and Anchor IDLs (legacy and 0.30+), which are converted into Codama nodes.
+`sift` turns raw program accounts into readable data. Point it at a program,
+give it an IDL (or let it find one on-chain or in your workspace), and browse
+every account of a given type, decoded field by field, in an interactive
+terminal UI. The same tooling is available to AI agents through a built-in MCP
+server.
+
+What it does today:
+
+- **Decodes accounts from any IDL.** Works with Codama IDLs and Anchor IDLs
+  (legacy and 0.30+), and supports the full Codama type system.
+- **Finds IDLs for you.** Pulls the canonical IDL published on-chain through
+  Program Metadata, or discovers it in your local Anchor or Codama project.
+- **Lists accounts at any scale.** Discovers every account of a type and
+  streams in details as you scroll, so large programs stay responsive.
+- **Inspects deployed programs.** Shows the upgrade authority, ProgramData
+  address, on-chain IDL, and verified build status in one view.
+- **Patches account data offline.** Change a field by name (`authority=...`)
+  and get back the re-encoded bytes. Useful for test fixtures and local
+  validators. Nothing is written on-chain.
+- **Builds unsigned transactions.** Name an instruction, pass its accounts and
+  arguments, and get a serialized transaction ready for your signer of choice.
+  `sift` never holds keys, signs, or sends.
+- **Gives AI agents the same tools.** `sift mcp` lets Claude Code, Codex, or
+  any MCP client query, filter, and aggregate decoded accounts.
+
+## Install
+
+You'll need a recent Rust toolchain (1.85 or newer) and
+[`just`](https://github.com/casey/just).
+
+```sh
+# Install just if you don't have it
+brew install just        # or: cargo install just
+
+git clone https://github.com/MicaiahReid/sift.git
+cd sift
+just install
+```
+
+`just install` builds the CLI and puts `sift` on your `PATH` through
+`cargo install`. Run `sift --help` to confirm it worked.
 
 ## Quick start
 
+Register a program's IDL once, give it a friendly name, and start exploring:
+
 ```sh
-sift idl add PROGRAM --file target/idl/example.json
-sift --url mainnet idl add PROGRAM --onchain
-sift idl prefer PROGRAM local-1
-sift idl alias PROGRAM example
-sift idl alias example another-alias
-sift idl show example
-sift program list
-sift program show example
-sift account list State --program PROGRAM
-sift account patch ADDRESS --program PROGRAM --set authority=NEW_ADDRESS
-sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg amount=10
+# Grab the IDL the program published on-chain...
+sift idl add PROGRAM_ADDRESS --onchain --alias myprogram
+
+# ...or use one from your own project
+sift idl add PROGRAM_ADDRESS --file target/idl/myprogram.json --alias myprogram
+
+# Browse the program's accounts, instructions, and types
+sift idl show myprogram
+
+# Browse every account of one type
+sift account list State --program myprogram
+
+# Check who controls the program and whether its build is verified
+sift program show myprogram
 ```
 
-The CLI never signs or sends a transaction. `transaction build` emits a
-serialized unsigned wire transaction, base64 by default.
+Working inside an Anchor or Codama project? You can often skip `idl add`
+entirely. `sift` finds the matching IDL in your workspace and offers to
+register it.
 
-The `account`, `transaction`, `idl`, and `program` command groups also accept
-their plural forms: `accounts`, `transactions`, `idls`, and `programs`.
+## What you can do
 
-`program show` accepts the same addresses and aliases as `idl show`. It prints a
-program's loader, ProgramData address, upgrade authority, canonical on-chain
-IDL address, and verified build. On mainnet, verified builds are looked up
-through the OtterSec verification API (`verify.osec.io`). Pass `--json` or pipe
-the output to print JSON. `program list` inspects every registered program and
-opens the results in the interactive browser; pass `--no-tui` or pipe the
-output to print JSON.
+### Browse accounts
 
-`idl list`, `idl show`, and `program list` open an interactive browser in a terminal. Use Enter
-to drill in, Esc to go back, `r` to view JSON, `c` to copy, and `q` to quit.
-Pass `--no-tui` or pipe the output to print JSON.
+```sh
+sift account list State --program myprogram
+```
 
-`account list` opens the browser while matching addresses are discovered. It
-lists those addresses as soon as discovery finishes, then fills in their details
-in batches of 100. After the first batch, press `n` or scroll past row 90 of
-the loaded range to fetch the next 100. Pending rows show “Waiting for details”;
-loaded rows can be opened immediately. Press `n` to retry a failed request. You can
-browse or quit while requests are in flight. JSON viewing and copying include
-all discovered addresses, with a `status` for pending or unavailable accounts.
-With `--no-tui` or piped output, the command prints the complete decoded JSON.
+Opens an interactive browser listing every `State` account the program owns.
+Addresses appear as soon as they're found, and details load in batches as you
+scroll. Press Enter to open an account, `r` to view raw JSON, `c` to copy, and
+`q` to quit.
 
-## MCP server for AI agents
+Every browsing command prints JSON instead when you pass `--no-tui` or pipe the
+output, so `sift` slots into scripts and `jq` pipelines.
 
-`sift mcp` serves the same registry and account tooling to AI agents over the
-Model Context Protocol on stdio. Global options such as `--url`, `--commitment`,
-and `--config` set the server defaults; most tools also accept a per-call
-`rpc_url`. Register it with an agent, for example in Claude Code:
+### Inspect programs
+
+```sh
+sift program show myprogram   # one program
+sift program list             # every program you've registered
+```
+
+See the program's loader, upgrade authority, ProgramData address, on-chain IDL
+location, and, on mainnet, its verified build status from OtterSec.
+
+### Patch an account
+
+```sh
+sift account patch ACCOUNT_ADDRESS --program myprogram --set authority=NEW_ADDRESS
+```
+
+Fetches the account, changes the fields you name, and prints the re-encoded
+bytes (base64 by default). This is handy for cloning mainnet state into a local
+validator with a few tweaks.
+
+### Build a transaction
+
+```sh
+sift transaction build do_thing --program myprogram \
+  --account state=STATE_ADDRESS \
+  --arg amount=10
+```
+
+Prints an unsigned, serialized transaction for one instruction. Hand it to the
+wallet or signer you already trust.
+
+### Manage IDLs
+
+```sh
+sift idl list                         # everything registered
+sift idl alias PROGRAM_ADDRESS mine   # add another name
+sift idl prefer myprogram local-1     # pick which source wins
+sift idl remove myprogram
+```
+
+A program can have several IDL sources (a local file, a URL, the on-chain
+copy). `sift` keeps them all, uses your preferred one, and falls back to the
+others.
+
+## Use sift with AI agents (MCP)
+
+`sift mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server, so an agent can answer questions like *"which vaults have more than
+1,000 SOL deposited?"* or *"who is the upgrade authority on this program?"*
+directly from on-chain data.
+
+Install `sift` first (see [Install](#install)), then add it to your agent.
+
+**Claude Code**
+
+```sh
+claude mcp add sift --scope user -- sift mcp --url mainnet
+```
+
+**Codex**
+
+```sh
+codex mcp add sift -- sift mcp --url mainnet
+```
+
+**Claude Desktop, Cursor, and other MCP clients**
+
+Add this to the client's MCP configuration file (for example
+`claude_desktop_config.json` or `~/.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "sift": { "command": "sift", "args": ["mcp", "--url", "mainnet"] }
+    "sift": {
+      "command": "sift",
+      "args": ["mcp", "--url", "mainnet"]
+    }
   }
 }
 ```
 
-Tools:
+Swap `mainnet` for `devnet`, `localhost`, or your own RPC URL. If your client
+can't find the `sift` binary, use its full path (`which sift`).
 
-| Tool | Purpose |
-|---|---|
-| `idl_list` | Registered programs, aliases, and IDL sources. |
-| `idl_add` / `idl_alias` / `idl_prefer` / `idl_remove` | Registry management, matching the CLI. |
-| `idl_show` | Compact schema summary, or one definition expanded with its referenced types. |
-| `program_show` | Loader, ProgramData, upgrade authority, on-chain IDL address, and verified build for one program. |
-| `account_list` | Decoded accounts of one type with server-side `where` filters, `fields` projection, `sort_by`, `aggregate` (sum/min/max/avg/count), and `limit`/`offset` paging. Decoded results are cached for 60 seconds. |
-| `account_get` | Decode one address; the owner's IDL is used when `program` is omitted. |
-| `account_patch` | Offline byte patching, identical to `sift account patch`. |
-| `transaction_build` | Unsigned transaction for one instruction. |
+Once it's connected, agents can:
 
-Programs without a registered IDL are registered automatically from the
-canonical on-chain Program Metadata IDL when one exists; the response notes
-when that happens. The registry resource `sift://registry` exposes the raw
-registry JSON.
+- list, register, and alias IDLs
+- read a program's schema
+- inspect a deployed program
+- fetch and decode a single account, or list accounts of a type with
+  filtering, sorting, field selection, and aggregates (sum, min, max, average,
+  count)
+- patch account bytes and build unsigned transactions
+
+If an agent asks about a program you haven't registered, `sift` registers its
+on-chain IDL automatically when one exists.
 
 ## Configuration
 
-The default registry is `~/.config/sift/registry.toml` on macOS and Linux
-(respecting `XDG_CONFIG_HOME`), and `%APPDATA%\solana\sift\config\registry.toml`
-on Windows. Use `--config PATH` to select another registry and `--idl PATH`
-to use an IDL without persisting it.
+- **RPC endpoint.** `sift` uses public mainnet by default. Pass `--url` with a
+  full RPC URL or a shorthand (`localhost`, `devnet`, `testnet`, `mainnet`).
+- **Registry.** Registered IDLs live in `~/.config/sift/registry.toml` on macOS
+  and Linux, and under `%APPDATA%` on Windows. Pass `--config PATH` to use a
+  different one.
+- **One-off IDLs.** Pass `--idl PATH` to use an IDL for a single command
+  without saving it.
+- **Debug logs.** Add `-v` (or `-vv`) to see what `sift` is doing, including
+  full RPC requests. Logs go to stderr, so JSON output stays clean.
 
-`--url` accepts a full RPC URL or the `localhost`, `devnet`, `testnet`,
-`mainnet`, and `mainnet-beta` cluster shorthands. CLI and MCP requests default
-to `https://api.mainnet-beta.solana.com`, independently of the Solana CLI
-configuration. Use `--url` to override it, or `rpc_url` for an individual MCP call.
+## What's next
 
-Use `sift idl add PROGRAM --idl-url URL` to register an HTTP(S) IDL document;
-`--url` is reserved for the Solana RPC endpoint.
+These aren't supported yet:
 
-## Debug logging
+- **Automatic PDA resolution** when building transactions. Today, accounts
+  derived from seeds must be passed explicitly.
+- **Multi-instruction transactions.** `transaction build` currently builds one
+  instruction at a time.
+- **Loading patched accounts into a local validator** directly, instead of
+  copying the bytes by hand.
+- **Non-canonical on-chain IDLs**, such as Program Metadata IDLs published by
+  someone other than the program's upgrade authority.
+- **YAML and TOML on-chain IDLs.** Only JSON is read today.
+- **Anchor IDLs with generic types.**
 
-Use `-v` for debug logs or repeat it (`-vv`) for trace logs. Logs are written
-to stderr, leaving stdout safe for JSON and encoded-byte output. `RUST_LOG`
-takes precedence and supports standard tracing filters, for example:
+## Development
 
 ```sh
-RUST_LOG=sift_core::rpc=debug,sift=debug sift account list State --program PROGRAM
+just check   # type-check the workspace
+just test    # run the test suite
+just lint    # clippy with warnings as errors
+just fmt     # format the code
 ```
-
-Debug RPC logs include the complete JSON-RPC request payload and response.
-
-If no schema is registered, `sift` searches the nearest Cargo workspace for a
-local IDL in three ways: Anchor member projects whose `Anchor.toml` declares
-the requested program ID (`<member>/target/idl` first, then
-`<workspace>/target/idl`), `codama.json` configuration files whose `idl` path
-names the program, and any other JSON document in the project that parses as a
-Codama or Anchor IDL and declares the program address. In an interactive
-terminal, it asks before registering a discovered IDL. With `--no-input`, a
-single match is used only for that invocation and is never persisted;
-ambiguous matches require `--idl` or an interactive selection.
-
-## IDL support
-
-Every schema is held as Codama type nodes, so the decoder supports the full
-Codama type system: numbers of any width and endianness, booleans, public keys,
-strings and bytes with size prefixes, fixed sizes, sentinels or remainder
-semantics, arrays, sets and maps with fixed, prefixed or remainder counts,
-tuples, structs, enums with explicit discriminator values and tuple or struct
-variants, prefixed, fixed, zeroable and remainder options, hidden prefixes and
-suffixes, offsets, defined type links, and amount, date-time and SOL amount
-wrappers.
-
-Account types are matched by their Codama discriminators (`constant`, `field`
-and `size` discriminator nodes). Anchor IDLs contribute their usual eight-byte
-discriminators. When a Codama IDL declares no discriminator for an account but
-the layout starts with a field named like a discriminator whose values are
-listed in an enum (`accountDiscriminator { plan = 1, ... }`), sift infers the
-byte pattern from the enum variant named after the account and marks it as
-`inferred` in `sift idl show`. Account types with no discriminator at all are
-listed by fetching every program account and keeping those that decode
-cleanly.
-
-Decoded JSON uses numbers for integers up to 32 bits and floats, decimal
-strings for wider integers, base58 strings for public keys, arrays of integers
-for byte sequences, `{"kind": VARIANT, "fields": ...}` objects for enums, and
-arrays of `{"key", "value"}` entries for maps. Fields whose Codama
-`defaultValueStrategy` is `omitted`, such as Anchor discriminators, are hidden
-from decoded output and filled from their defaults when encoding.
-
-Canonical on-chain Program Metadata IDLs can be registered with `--onchain`.
-Sift validates and pins the canonical `idl` metadata PDA, then revalidates it
-when loading. Discovered local and on-chain sources are independently offered
-for registration; source IDs and the per-program `priority` list are shown by
-`sift idl list`. `sift idl prefer PROGRAM SOURCE_ID` changes the preferred
-source while retaining lower-priority fallbacks.
