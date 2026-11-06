@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use serde_json::Value;
 use sift_types::{IdlSource, RegistryConfig};
 use tracing::{debug, warn};
@@ -28,8 +28,22 @@ pub struct LoadedSchema {
     pub source: IdlSource,
 }
 
-/// Returns the platform-appropriate persistent registry location.
+/// Returns the persistent registry location.
+///
+/// On macOS this is `$XDG_CONFIG_HOME/sift/registry.toml`, falling back to
+/// `~/.config/sift/registry.toml`. Other platforms use their native config
+/// directory.
 pub fn default_registry_path() -> Result<PathBuf> {
+    if cfg!(target_os = "macos") {
+        // Match the CLI-tool convention of ~/.config rather than
+        // ~/Library/Application Support, so the file is easy to find and edit.
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
+            .ok_or_else(|| anyhow::anyhow!("cannot determine a home directory"))?;
+        return Ok(config_home.join("sift").join("registry.toml"));
+    }
     let dirs = ProjectDirs::from("org", "solana", "sift")
         .ok_or_else(|| anyhow::anyhow!("cannot determine a platform config directory"))?;
     Ok(dirs.config_dir().join("registry.toml"))
