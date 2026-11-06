@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Map, Value, json};
-use sift_core::{Registry, nodes, summary::type_label};
+use sift_core::{ProgramInfo, Registry, nodes, summary::type_label};
 use sift_types::{IdlSource, ProgramSchema};
 use std::{
     collections::BTreeMap,
@@ -275,6 +275,142 @@ pub(crate) fn idl_document(registry: &Registry) -> BrowserDocument {
         },
     }
 }
+/// One registered program and the outcome of inspecting it on chain.
+pub(crate) struct ListedProgram {
+    pub(crate) address: String,
+    pub(crate) aliases: Vec<String>,
+    pub(crate) info: Result<ProgramInfo, String>,
+}
+
+impl ListedProgram {
+    pub(crate) fn as_json(&self) -> Value {
+        match &self.info {
+            Ok(info) => {
+                let mut value = serde_json::to_value(info).expect("program info serializes");
+                value["aliases"] = json!(self.aliases);
+                value
+            }
+            Err(error) => json!({"address": self.address, "aliases": self.aliases, "error": error}),
+        }
+    }
+}
+
+pub(crate) fn program_list_document(programs: &[ListedProgram], rpc_url: &str) -> BrowserDocument {
+    let raw = Value::Array(programs.iter().map(ListedProgram::as_json).collect());
+    let nodes = programs
+        .iter()
+        .map(|program| {
+            let raw = program.as_json();
+            let mut node = source_field(&program.address, raw.clone(), String::new());
+            let mut children = vec![source_field(
+                "Aliases",
+                json!(program.aliases),
+                program.aliases.join(", "),
+            )];
+            match &program.info {
+                Ok(info) => {
+                    node.preview = program_flags(info, &program.aliases);
+                    children.extend(program_info_children(info, &raw));
+                }
+                Err(error) => {
+                    node.preview = error.clone();
+                    node.warning = true;
+                    children.push(source_field("Error", json!(error), error.clone()));
+                }
+            }
+            node.children = children;
+            node
+        })
+        .collect();
+    let verified = programs
+        .iter()
+        .filter(|program| matches!(&program.info, Ok(info) if info.verified_build.is_some()))
+        .count();
+    BrowserDocument {
+        title: "Programs".into(),
+        header: Header {
+            title: "Registered programs".into(),
+            rows: vec![
+                row(
+                    "Programs",
+                    programs.len().to_string(),
+                    Some(("Verified", verified.to_string())),
+                ),
+                row("RPC", rpc_url.to_owned(), None),
+            ],
+        },
+        raw,
+        nodes,
+    }
+}
+
+fn program_flags(info: &ProgramInfo, aliases: &[String]) -> String {
+    let mut flags = Vec::new();
+    if !aliases.is_empty() {
+        flags.push(aliases.join(", "));
+    }
+    flags.push(
+        if info.authority.is_some() {
+            "upgradeable"
+        } else {
+            "immutable"
+        }
+        .to_owned(),
+    );
+    if info.idl_address.is_some() {
+        flags.push("on-chain IDL".to_owned());
+    }
+    if info.verified_build.is_some() {
+        flags.push("verified".to_owned());
+    }
+    flags.join(" · ")
+}
+
+fn program_info_children(info: &ProgramInfo, raw: &Value) -> Vec<Node> {
+    let optional = |label: &str, value: &Option<String>, missing: &str| {
+        source_field(
+            label,
+            json!(value),
+            value.clone().unwrap_or_else(|| missing.to_owned()),
+        )
+    };
+    let mut children = vec![
+        source_field("Loader", json!(info.loader), info.loader.clone()),
+        optional("ProgramData", &info.programdata_address, "none"),
+        optional("Authority", &info.authority, "none (immutable)"),
+    ];
+    if let Some(slot) = info.last_deployed_slot {
+        children.push(source_field("Deployed slot", json!(slot), slot.to_string()));
+    }
+    children.push(optional("IDL", &info.idl_address, "none"));
+    let mut verified = source_field(
+        "Verified build",
+        raw["verified_build"].clone(),
+        info.verified_build
+            .as_ref()
+            .map(|build| build.repo_url.clone())
+            .unwrap_or_else(|| "none".to_owned()),
+    );
+    if let Some(build) = &info.verified_build {
+        verified.children = vec![
+            source_field("Repository", json!(build.repo_url), build.repo_url.clone()),
+            source_field("Commit", json!(build.commit), build.commit.clone()),
+            source_field(
+                "Hash",
+                json!(build.executable_hash),
+                build.executable_hash.clone(),
+            ),
+        ];
+        if let Some(at) = &build.last_verified_at {
+            verified
+                .children
+                .push(source_field("Verified at", json!(at), at.clone()));
+        }
+    }
+    children.push(verified);
+    children
+}
+
 pub(crate) fn idl_schema_document(schema: &ProgramSchema, idl_location: String) -> BrowserDocument {
     let raw = serde_json::to_value(schema).expect("program schema serializes");
     let nodes = [

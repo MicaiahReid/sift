@@ -62,11 +62,35 @@ impl RpcClient {
 
     /// Gets one account's base64 bytes, or `None` when it does not exist.
     pub async fn account(&self, address: &str) -> Result<Option<RpcAccount>> {
+        self.account_info(
+            address,
+            json!({"encoding": "base64", "commitment": self.commitment}),
+        )
+        .await
+    }
+
+    /// Gets `length` bytes of one account starting at `offset`, or `None` when it does not exist.
+    ///
+    /// The returned data is shorter than `length` when the account ends first.
+    pub async fn account_slice(
+        &self,
+        address: &str,
+        offset: usize,
+        length: usize,
+    ) -> Result<Option<RpcAccount>> {
+        self.account_info(
+            address,
+            json!({
+                "encoding": "base64", "commitment": self.commitment,
+                "dataSlice": {"offset": offset, "length": length}
+            }),
+        )
+        .await
+    }
+
+    async fn account_info(&self, address: &str, config: Value) -> Result<Option<RpcAccount>> {
         let result = self
-            .call(
-                "getAccountInfo",
-                json!([address, {"encoding":"base64", "commitment":self.commitment}]),
-            )
+            .call("getAccountInfo", json!([address, config]))
             .await?;
         let Some(value) = result.get("value").filter(|value| !value.is_null()) else {
             return Ok(None);
@@ -78,6 +102,15 @@ impl RpcClient {
             .to_owned();
         let data = decode_data(value)?.ok_or_else(|| anyhow::anyhow!("account has no data"))?;
         Ok(Some(RpcAccount { owner, data }))
+    }
+
+    /// Returns the cluster's genesis hash, which identifies the network it belongs to.
+    pub async fn genesis_hash(&self) -> Result<String> {
+        self.call("getGenesisHash", json!([]))
+            .await?
+            .as_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("getGenesisHash result is not a string"))
     }
 
     /// Gets one account's base64 bytes, or `None` when it does not exist.

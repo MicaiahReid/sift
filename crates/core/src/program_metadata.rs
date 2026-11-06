@@ -12,7 +12,7 @@ use spl_program_metadata_client::{
 };
 use tracing::debug;
 
-use crate::RpcClient;
+use crate::{RpcAccount, RpcClient};
 
 /// The public Program Metadata deployment.
 pub const PROGRAM_METADATA_ID: &str = "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S";
@@ -53,6 +53,24 @@ pub async fn load_canonical_idl(
     load_at(client, program, address).await
 }
 
+/// Returns the canonical `idl` metadata address for `program` when a valid record exists there.
+///
+/// Returns `None` when the account is missing or does not hold this program's
+/// canonical `idl` metadata. The IDL content itself is not fetched.
+pub async fn canonical_idl_address(client: &RpcClient, program: &str) -> Result<Option<String>> {
+    let address = discover_address(program)?;
+    match client.account(&address).await? {
+        None => Ok(None),
+        Some(account) => match validate_metadata(&account, program) {
+            Ok(_) => Ok(Some(address)),
+            Err(error) => {
+                debug!(program, idl_address = address, error = %error, "ignoring invalid canonical IDL account");
+                Ok(None)
+            }
+        },
+    }
+}
+
 fn discover_address(program: &str) -> Result<String> {
     let program_key = parse_address(program)?;
     let metadata_program = parse_address(PROGRAM_METADATA_ID)?;
@@ -75,6 +93,15 @@ async fn load_at(client: &RpcClient, program: &str, address: &str) -> Result<Can
         .account(address)
         .await?
         .ok_or_else(|| anyhow::anyhow!("canonical on-chain IDL account does not exist"))?;
+    let metadata = validate_metadata(&account, program)?;
+    let text = metadata_content(&metadata, client).await?;
+    Ok(CanonicalIdl {
+        address: address.to_owned(),
+        text,
+    })
+}
+
+fn validate_metadata(account: &RpcAccount, program: &str) -> Result<ProgramMetadata> {
     if account.owner != PROGRAM_METADATA_ID {
         bail!("canonical on-chain IDL account is not owned by Program Metadata")
     }
@@ -90,11 +117,7 @@ async fn load_at(client: &RpcClient, program: &str, address: &str) -> Result<Can
     if !metadata.canonical {
         bail!("on-chain metadata is not canonical")
     }
-    let text = metadata_content(&metadata, client).await?;
-    Ok(CanonicalIdl {
-        address: address.to_owned(),
-        text,
-    })
+    Ok(metadata)
 }
 
 async fn metadata_content(metadata: &ProgramMetadata, client: &RpcClient) -> Result<String> {

@@ -50,6 +50,9 @@ enum Command {
     /// Manage persistent IDL sources.
     #[command(visible_alias = "idls")]
     Idl(commands::idl::IdlCommand),
+    /// Inspect deployed programs.
+    #[command(visible_alias = "programs")]
+    Program(commands::program::ProgramCommand),
     /// Serve the registry and account tools to AI agents over MCP on stdio.
     Mcp,
 }
@@ -107,6 +110,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Account(command) => command.execute(&mut registry, &context).await,
         Command::Transaction(command) => command.execute(&mut registry, &context).await,
         Command::Idl(command) => command.execute(&mut registry, &context).await,
+        Command::Program(command) => command.execute(&registry, &context).await,
         Command::Mcp => {
             let options = sift_mcp::ServerOptions {
                 url: context.url,

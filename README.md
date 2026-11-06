@@ -14,6 +14,8 @@ sift idl prefer PROGRAM local-1
 sift idl alias PROGRAM example
 sift idl alias example another-alias
 sift idl show example
+sift program list
+sift program show example
 sift account list State --program PROGRAM
 sift account patch ADDRESS --program PROGRAM --set authority=NEW_ADDRESS
 sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg amount=10
@@ -22,10 +24,18 @@ sift transaction build do_thing --program PROGRAM --account state=ADDRESS --arg 
 The CLI never signs or sends a transaction. `transaction build` emits a
 serialized unsigned wire transaction, base64 by default.
 
-The `account`, `transaction`, and `idl` command groups also accept their plural
-forms: `accounts`, `transactions`, and `idls`.
+The `account`, `transaction`, `idl`, and `program` command groups also accept
+their plural forms: `accounts`, `transactions`, `idls`, and `programs`.
 
-`idl list` and `idl show` open an interactive browser in a terminal. Use Enter
+`program show` accepts the same addresses and aliases as `idl show`. It prints a
+program's loader, ProgramData address, upgrade authority, canonical on-chain
+IDL address, and verified build. On mainnet, verified builds are looked up
+through the OtterSec verification API (`verify.osec.io`). Pass `--json` or pipe
+the output to print JSON. `program list` inspects every registered program and
+opens the results in the interactive browser; pass `--no-tui` or pipe the
+output to print JSON.
+
+`idl list`, `idl show`, and `program list` open an interactive browser in a terminal. Use Enter
 to drill in, Esc to go back, `r` to view JSON, `c` to copy, and `q` to quit.
 Pass `--no-tui` or pipe the output to print JSON.
 
@@ -60,6 +70,7 @@ Tools:
 | `idl_list` | Registered programs, aliases, and IDL sources. |
 | `idl_add` / `idl_alias` / `idl_prefer` / `idl_remove` | Registry management, matching the CLI. |
 | `idl_show` | Compact schema summary, or one definition expanded with its referenced types. |
+| `program_show` | Loader, ProgramData, upgrade authority, on-chain IDL address, and verified build for one program. |
 | `account_list` | Decoded accounts of one type with server-side `where` filters, `fields` projection, `sort_by`, `aggregate` (sum/min/max/avg/count), and `limit`/`offset` paging. Decoded results are cached for 60 seconds. |
 | `account_get` | Decode one address; the owner's IDL is used when `program` is omitted. |
 | `account_patch` | Offline byte patching, identical to `sift account patch`. |
